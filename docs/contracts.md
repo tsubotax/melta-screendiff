@@ -45,12 +45,21 @@ SKILL.md（オーケストレーション層 / AIが読む手順書）
   },
   "screens": {
     "route_map": [
+      // web backend では path が必須（"/" 始まり）。iOSでは不要（id が deeplink の {id} に入る）
       {"file_pattern": "^src/pages/home/", "id": "home", "path": "/", "title": "ホーム"}
     ],
     "resolver_command": null           // 下記2の契約を満たす外部コマンド（route_mapより優先）
   }
 }
 ```
+
+load_config.py は後段の silent 事故を防ぐため、**確定前に**以下を検証して落とす:
+
+- `target_file_patterns` / `route_map[].file_pattern` が正規表現としてコンパイルできること
+- web backend の `route_map[]` に**非空の `path`（"/" 始まり）**があること
+  — ⚠️ 省略を許すと resolve_screens.py が空文字を返し、撮影URLが `serve_url` そのもの（＝トップページ）になる。エラーも出ないまま「変更された画面」としてトップを撮り、Before/Afterが一致して「差分なし」と誤結論する
+- `web.serve_url` が `http://` / `https://` で始まること（末尾スラッシュは出力時に除去され、`serve_url + path` の連結が二重スラッシュにならない）
+- 設定ファイルの最上位がJSONオブジェクトであること
 
 ## 2. resolver 契約（resolve_screens.py / resolver_command）
 
@@ -85,13 +94,27 @@ SKILL.md（オーケストレーション層 / AIが読む手順書）
   "files": ["<abs>/before-home-p1.png", "..."],  // ページ順
   "truncated": false,         // 上限到達で終端未検出（iOSページングのみ）
   "fallback_single": false,   // 全域撮影が使えず1枚のみ（iOS: sim-use不在 / web: Playwright不在）
-  "paging_failed": false      // ページ送りが途中失敗。撮れたページまでは files に含む
+  "paging_failed": false,     // ページ送りが途中失敗。撮れたページまでは files に含む
+
+  // 以下はweb backendのみ。「何を撮ったか」の記録
+  "requested_url": "http://localhost:5173/about",
+  "final_url": "http://localhost:5173/about",  // リダイレクト追跡後
+  "title": "About"                             // レスポンスHTMLの <title>
 }
 ```
 
 **失敗を成功偽装しない**のがこの契約の核。3つのboolフラグは manifest に転記され、比較HTMLに
 警告表示される（「全域撮れたつもりで実は1ページ目だけ」が差分見落としを生むため）。
 exit 0 以外は「取得失敗」であり、その画面をmanifestに載せてはいけない。
+
+web backend は撮影前に対象URLを1回GETし、**`final_url` が要求URLと異なれば中断**する
+（末尾スラッシュのみの差は同一とみなす）。認証が要る画面でログイン画面を「その画面」として
+撮る事故を防ぐため。意図的なリダイレクトを撮りたい場合のみ `--allow-redirect`。
+
+⚠️ **この検知はHTTPレベルのリダイレクトに限る**。JSによるクライアントサイド遷移や、SPAの
+404フォールバック（存在しないパスでも200 + シェルHTMLを返す）は素通りする。`title` が
+Before/Afterで食い違う、または対象画面すべてで同一の場合はこれらを疑い、比較HTMLの目視
+確認に回す。
 
 ## 4. manifest 契約（render_comparison.py の入力）
 

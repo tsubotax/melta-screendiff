@@ -19,6 +19,7 @@
 """
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -58,7 +59,7 @@ DEFAULTS = {
     "screens": {
         # 変更ファイル → 画面の宣言的マッピング。file_pattern は repo-root 相対パスへの正規表現
         # 例: {"file_pattern": "^src/pages/home/", "id": "home", "path": "/", "title": "Home"}
-        #     path は web backend でのURLパス。iOS では不要（id が deeplink に入る）
+        #     path は web backend では必須（"/" 始まり）。iOS では不要（id が deeplink に入る）
         "route_map": [],
         # 複雑なリポジトリ向けの逃げ道。変更ファイルパスを引数に取り
         # {"resolved": [...], "unresolved": [...]} を stdout に出すコマンド（docs/contracts.md 参照）
@@ -95,6 +96,13 @@ def validate(config: dict) -> list[str]:
         errors.append("target_file_patterns は文字列の配列です")
     elif not patterns:
         errors.append("target_file_patterns が空です（適用範囲判定ができず全PRが対象外になります）")
+    else:
+        # 不正な正規表現は Phase 1 の適用範囲判定まで露見しないため、ここで落とす
+        for i, pattern in enumerate(patterns):
+            try:
+                re.compile(pattern)
+            except re.error as e:
+                errors.append(f"target_file_patterns[{i}] の正規表現が不正です: {pattern!r} ({e})")
     screens = config.get("screens", {})
     route_map = screens.get("route_map", [])
     if not isinstance(route_map, list):
@@ -103,11 +111,34 @@ def validate(config: dict) -> list[str]:
         for i, entry in enumerate(route_map):
             if not isinstance(entry, dict) or not entry.get("file_pattern") or not entry.get("id"):
                 errors.append(f"screens.route_map[{i}] に file_pattern と id が必要です")
+                continue
+            try:
+                re.compile(entry["file_pattern"])
+            except re.error as e:
+                errors.append(
+                    f"screens.route_map[{i}].file_pattern の正規表現が不正です: {entry['file_pattern']!r} ({e})")
+            if backend == "web":
+                # ⚠️ path 未指定を許すと resolve_screens.py が空文字を返し、撮影URLが
+                # serve_url そのもの（＝トップページ）になる。エラーも出ないまま
+                # 「変更された画面」としてトップを撮り、Before/Afterが一致して
+                # 「差分なし」と誤結論する。silent事故の温床なので確定前に落とす
+                path = entry.get("path")
+                if not isinstance(path, str) or not path:
+                    errors.append(
+                        f'screens.route_map[{i}] (id="{entry["id"]}") に path が必要です'
+                        "（web backend。省略するとトップページをその画面として撮影してしまう）")
+                elif not path.startswith("/"):
+                    errors.append(
+                        f'screens.route_map[{i}] (id="{entry["id"]}") の path は "/" 始まりです: {path!r}')
     if not route_map and not screens.get("resolver_command"):
         errors.append("screens.route_map か screens.resolver_command のどちらかが必要です")
     if backend == "web":
-        if not config.get("web", {}).get("serve_command"):
+        web = config.get("web", {})
+        if not web.get("serve_command"):
             errors.append("web.serve_command が必要です")
+        serve_url = web.get("serve_url")
+        if not isinstance(serve_url, str) or not serve_url.startswith(("http://", "https://")):
+            errors.append(f"web.serve_url は http:// または https:// で始まるURLです: {serve_url!r}")
     if backend == "ios":
         ios = config.get("ios", {})
         for key in ("build_command", "app_path", "bundle_id", "deeplink", "simulator_device"):
@@ -122,12 +153,20 @@ def load_from(path: Path) -> int:
     except json.JSONDecodeError as e:
         print(json.dumps({"error": f"設定ファイルのJSONが不正です: {path} ({e})"}, ensure_ascii=False))
         return 1
+    if not isinstance(user_config, dict):
+        print(json.dumps({"error": f"設定ファイルの最上位はJSONオブジェクトです: {path}"}, ensure_ascii=False))
+        return 1
     merged = deep_merge(DEFAULTS, user_config)
     errors = validate(merged)
     if errors:
         print(json.dumps({"error": "設定が不正です", "config_source": str(path), "details": errors},
                          ensure_ascii=False, indent=2))
         return 1
+    # 撮影URLは serve_url + path の連結で組み立てるため、末尾スラッシュを正規化して
+    # "http://host//about" のような二重スラッシュを防ぐ（path 側は "/" 始まりを強制済み）
+    # （ios backend では serve_url は未検証なので、文字列のときだけ触る）
+    if isinstance(merged.get("web", {}).get("serve_url"), str):
+        merged["web"]["serve_url"] = merged["web"]["serve_url"].rstrip("/")
     merged["_config_source"] = str(path)
     print(json.dumps(merged, ensure_ascii=False, indent=2))
     return 0

@@ -149,7 +149,7 @@ python3 "$SCRIPTS/backends/web/serve_ctl.py" start \
 
 serverの起動・停止は必ず `serve_ctl.py` を使う（`( cmd ) &` + PGID kill の自前管理は、非対話シェルでは呼び出し元シェルを道連れにする事故が実測済み）。
 
-各画面を撮影する（capture.py内で疎通待ち＋対象URLのHTTPステータス検証をする）。configの値を**全て**引数に渡し、**必ず `$REPO_ROOT` を cwd にして**実行する（npxが対象リポのdevDependencyのPlaywrightをcwdから解決するため。別のcwdだと無言でChromeフォールバックに落ちる）。stdout JSONはファイルに保存してから読む（成否echoと混ざるのを防ぐ）:
+各画面を撮影する（capture.py内で疎通待ち＋対象URLのHTTPステータス検証＋リダイレクト検知をする）。configの値を**全て**引数に渡し、**必ず `$REPO_ROOT` を cwd にして**実行する（npxが対象リポのdevDependencyのPlaywrightをcwdから解決するため。別のcwdだと無言でChromeフォールバックに落ちる）。stdout JSONはファイルに保存してから読む（成否echoと混ざるのを防ぐ）:
 
 ```bash
 (cd "$REPO_ROOT" && python3 "$SCRIPTS/backends/web/capture.py" \
@@ -164,6 +164,10 @@ cat "$OUT_DIR/capture-after-<screen_id>.json"
 ```
 
 CAPTURE_FAILEDの画面は「取得失敗」としてmanifestに載せず、ユーザーに報告する（他の画面の処理は継続してよい）。
+
+**リダイレクトで中断した場合**（stderrに「〜にリダイレクトされました」）は、認証が必要な画面である可能性が高い。**勝手に `--allow-redirect` を付けて撮り直さない**（ログイン画面をその画面として撮る事故になる）。ユーザーに提示し、リダイレクト先を撮るのが意図どおりか確認を取ってから付ける。
+
+**撮影結果の `requested_url` / `final_url` / `title` はBefore/Afterで突き合わせる**。titleが食い違う、あるいは対象画面すべてのtitleが同一なら、SPAの404フォールバックやログイン画面を撮っている疑いがある（これらはHTTP 200を返すためcapture.py側では検知できない）。推測で進めず、比較HTMLを目視したうえでユーザーに確認する。
 
 全画面の撮影が終わったら**必ずserverを止める**（次のcheckoutの前に。動いたままだと Before 側で別refのコードを配信し続ける）。serve_ctl が子プロセスごとSIGTERM→SIGKILLし、**ポートが空いたことまで確認**する:
 
@@ -345,6 +349,8 @@ RETURN_FAILEDの場合、および`stash pop`がコンフリクトした場合�
 | Afterビルド/起動失敗 | 中断、エラー内容を報告してCleanupへ |
 | Beforeビルド/起動失敗 | PR起因でない旨を明記しAfterのみで継続、最後にCleanupへ |
 | serve_urlが起動前から応答する（web） | 中断してユーザー確認（stale server事故防止） |
+| 対象URLが別URLへリダイレクトされる（web） | capture.pyが中断。認証必須画面の疑いを提示し、確認後のみ `--allow-redirect` |
+| Before/Afterでtitleが食い違う・全画面のtitleが同一（web） | SPAフォールバック/ログイン画面の疑い。目視確認のうえユーザーに確認 |
 | lint検出あり | 比較は継続、HTML/コメント下書き双方で明記 |
 | 新規/削除画面 | 該当側をスキップし単カラム表示 |
 | 全画面が新規 | Phase 4の本体処理はスキップ、Cleanupは実行 |
