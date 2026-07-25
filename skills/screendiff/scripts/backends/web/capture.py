@@ -141,8 +141,11 @@ def main() -> int:
                         help="対象URLが4xx/5xxでも撮影する（エラーページ自体を比較したい場合）")
     args = parser.parse_args()
 
-    if not re.fullmatch(r"\d+x\d+", args.viewport):
-        print(f"ERROR: --viewport は WxH 形式で指定してください（例 1280x800）: {args.viewport}", file=sys.stderr)
+    # \d はPythonでは全角数字にもマッチするため [0-9] を明示し、値域も検証する
+    vp = re.fullmatch(r"([0-9]+)x([0-9]+)", args.viewport, re.ASCII)
+    if not vp or not (1 <= int(vp.group(1)) <= 10000 and 1 <= int(vp.group(2)) <= 10000):
+        print(f"ERROR: --viewport は WxH 形式（各1〜10000）で指定してください（例 1280x800）: {args.viewport}",
+              file=sys.stderr)
         return 1
 
     out_dir = Path(args.out_dir)

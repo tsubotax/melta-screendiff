@@ -43,8 +43,18 @@ def start(args) -> int:
     )
     # 起動時刻も記録し、stop 時に「pid が別プロセスに再利用されていないか」を検証する
     # （pid + lstart はほぼ一意。コマンド文字列マッチはpsが解決済みバイナリパスを出すため使えない）
-    Path(args.pid_file).write_text(json.dumps(
-        {"pid": proc.pid, "cmd": args.cmd, "lstart": pid_lstart(proc.pid)}))
+    try:
+        Path(args.pid_file).write_text(json.dumps(
+            {"pid": proc.pid, "cmd": args.cmd, "lstart": pid_lstart(proc.pid)}))
+    except OSError as e:
+        # pid-fileを書けないと起動済みserverが追跡不能（Cleanupから止められない）になるため、
+        # server側を即座に片付けてからエラーにする
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        print(json.dumps({"error": f"pid-fileを書き込めません（serverは停止しました）: {e}"}, ensure_ascii=False))
+        return 1
 
     # 即死検知: コマンドのタイポ・ポート衝突は起動直後に死ぬ。ready待ちのタイムアウト
     # （数十秒）まで気づけないより、ここで即エラーにしてログ末尾を見せる
@@ -80,17 +90,26 @@ def stop(args) -> int:
         info = json.loads(raw)
         pgid, lstart = int(info["pid"]), info.get("lstart", "")
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-        try:
-            pgid, lstart = int(raw), ""  # 旧形式（数値のみ）後方互換
-        except ValueError:
-            print(json.dumps({"stopped": False, "forced": False, "note": f"pid-fileが不正です: {raw[:80]}"}))
-            return 1
+        # serve_ctl start が書いた形式以外は扱わない（数値のみ等の不明な形式で
+        # 検証なしのkillpgをすると、pid再利用時に無関係プロセスを殺しうる）
+        print(json.dumps({"stopped": False, "forced": False,
+                          "note": f"pid-fileがserve_ctlの形式ではありません。手動確認が必要: {raw[:80]}"},
+                         ensure_ascii=False))
+        return 1
+    if pgid <= 1:
+        # pid 0 は「呼び出し元自身のプロセスグループ」を意味し killpg(0) で自爆する
+        print(json.dumps({"stopped": False, "forced": False, "note": f"pid-fileのpidが不正です: {pgid}"}))
+        return 1
 
-    if lstart and group_alive(pgid) and pid_lstart(pgid) != lstart:
-        # pidは生きているが起動時刻が違う = server自然死後のpid再利用。無関係プロセスをkillしない
+    current_lstart = pid_lstart(pgid)
+    if group_alive(pgid) and current_lstart and lstart and current_lstart != lstart:
+        # リーダーpidが生きているが起動時刻が違う = server自然死後のpid再利用。無関係プロセスをkillしない。
+        # （current_lstart が空 = リーダーだけ死んで子が同一PGIDで残存しているケース。これは自分たちの
+        #   残骸なので通常どおりkillpgに進む。PGIDはグループ生存中は別プロセスに再割当てされない）
         pid_file.unlink(missing_ok=True)
         print(json.dumps({"stopped": True, "forced": False,
-                          "note": "pidが別プロセスに再利用されていたためkillせず終了（serverは既に停止済み）"}))
+                          "note": "pidが別プロセスに再利用されていたためkillせず終了（serverは既に停止済み）"},
+                         ensure_ascii=False))
         return 0
     forced = False
     try:

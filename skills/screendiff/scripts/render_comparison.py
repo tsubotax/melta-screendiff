@@ -23,9 +23,9 @@ DEFAULT_TEMPLATE = SCRIPT_DIR / "template.html"
 
 # 任意の画面ステータスバッジ。manifest の status がこの辞書に無い場合はバッジを出さない
 STATUS_BADGE_LABEL = {
-    "official": "✅ Official",
-    "exploring": "🔍 Exploring",
-    "archived": "🗄 Archived",
+    "stable": "✅ Stable",
+    "experimental": "🧪 Experimental",
+    "deprecated": "🗄 Deprecated",
 }
 
 
@@ -224,7 +224,7 @@ EXAMPLE_MANIFEST = {
         {
             "screen_id": "home",
             "title": "ホーム",
-            "status": "official",  # 任意（official/exploring/archived 以外はバッジ非表示）
+            "status": "stable",  # 任意（stable/experimental/deprecated 以外はバッジ非表示）
             "kind": "changed",  # "changed" | "new" | "removed"
             # ページング撮影の複数ページ。旧schemaの before_path/after_path（単数）も引き続き有効
             "before_paths": ["/tmp/before-home-p1.png", "/tmp/before-home-p2.png"],

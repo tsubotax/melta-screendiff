@@ -109,7 +109,7 @@ exit 0 以外は「取得失敗」であり、その画面をmanifestに載せ�
     {
       "screen_id": "home",
       "title": "ホーム",
-      "status": "official",            // 任意（official/exploring/archived のみバッジ表示）
+      "status": "stable",              // 任意（stable/experimental/deprecated のみバッジ表示）
       "kind": "changed",               // "changed" | "new"（Before無し） | "removed"（After無し）
       "before_paths": ["..."],         // capture契約の files をページ順のまま
       "after_paths": ["..."],
