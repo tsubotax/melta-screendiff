@@ -9,6 +9,12 @@ PR番号を渡すと、PRのbaseブランチ（Before）とPRブランチ（Afte
 - 比較HTMLの生成は画像をAIのコンテキストに通さない（PNGを直接base64でHTMLに埋め込み。AIが画像をReadするのは差分コメントを書くための目視のみで、埋め込み枚数はトークンを消費しない）
 - PRコメント投稿は下書き提示 → 人間承認のHITL（勝手に投稿しない）
 
+## 生成される比較HTML
+
+![Before/After比較HTMLの例](docs/images/comparison-example.png)
+
+実例: [melta-ui #1](https://github.com/tsubotax/melta-ui/pull/1)（ヒーローを春キャンペーン → 夏セールに変更したPR）。ビルド結果・検証状況・対象画面数をヘッダに出し、画面ごとに Before/After を横並びで表示する。対象画面が複数ある場合は上部の目次リンクから各画面へ飛べる。
+
 ## インストール
 
 ```
