@@ -13,7 +13,7 @@ PR番号を渡すと、PRのbaseブランチ（Before）とPRブランチ（Afte
 
 ![Before/After比較HTMLの例](docs/images/comparison-example.png)
 
-実例: [melta-ui #1](https://github.com/tsubotax/melta-ui/pull/1)（ヒーローを春キャンペーン → 夏セールに変更したPR）。ビルド結果・検証状況・対象画面数をヘッダに出し、画面ごとに Before/After を横並びで表示する。対象画面が複数ある場合は上部の目次リンクから各画面へ飛べる。
+実例: [melta-ui #2](https://github.com/tsubotax/melta-ui/pull/2)（2画面を変更したデモPR）。ビルド結果・検証状況・対象画面数をヘッダに出し、画面ごとに Before/After を横並びで表示する。対象画面が複数ある場合は上部の目次リンクから各画面へ飛べる。
 
 ## インストール
 
@@ -21,6 +21,23 @@ PR番号を渡すと、PRのbaseブランチ（Before）とPRブランチ（Afte
 /plugin marketplace add tsubotax/melta-screendiff
 /plugin install screendiff@melta
 ```
+
+## まず試す（自分のリポジトリに設定を書く前に）
+
+[melta-ui](https://github.com/tsubotax/melta-ui) に設定ファイル（`.claude/screendiff.json`）とデモPRを用意してある。**静的HTMLを `python3 -m http.server` で配信するだけなので、npm install も build も不要**:
+
+```bash
+git clone https://github.com/tsubotax/melta-ui.git
+cd melta-ui
+```
+
+Claude Code をこのディレクトリで開いて:
+
+```
+/screendiff:screendiff 2
+```
+
+[PR #2](https://github.com/tsubotax/melta-ui/pull/2) は常設のデモPR（マージしない）。上のスクリーンショットと同じものが手元で生成される。
 
 ## 前提条件
 
