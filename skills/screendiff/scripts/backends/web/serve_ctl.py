@@ -34,6 +34,26 @@ def pid_lstart(pid: int) -> str:
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
+def terminate_group(pgid: int) -> tuple[bool, bool]:
+    """プロセスグループへ SIGTERM → 最大5秒待機 → 残存なら SIGKILL。(stopped, forced) を返す。"""
+    forced = False
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and group_alive(pgid):
+        time.sleep(0.2)
+    if group_alive(pgid):
+        forced = True
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        time.sleep(0.5)
+    return (not group_alive(pgid), forced)
+
+
 def start(args) -> int:
     log = open(args.log, "w")
     proc = subprocess.Popen(
@@ -43,17 +63,22 @@ def start(args) -> int:
     )
     # 起動時刻も記録し、stop 時に「pid が別プロセスに再利用されていないか」を検証する
     # （pid + lstart はほぼ一意。コマンド文字列マッチはpsが解決済みバイナリパスを出すため使えない）
+    lstart = pid_lstart(proc.pid)
     try:
+        if not lstart:
+            # lstartが取れない = stop時の再利用検証が不可能になる。検証不能なserverを
+            # 走らせたままにしない（即死してps不可の場合も含め、ここで片付ける）
+            raise OSError("プロセス起動時刻(lstart)を取得できません")
         Path(args.pid_file).write_text(json.dumps(
-            {"pid": proc.pid, "cmd": args.cmd, "lstart": pid_lstart(proc.pid)}))
+            {"pid": proc.pid, "cmd": args.cmd, "lstart": lstart}))
     except OSError as e:
         # pid-fileを書けないと起動済みserverが追跡不能（Cleanupから止められない）になるため、
-        # server側を即座に片付けてからエラーにする
-        try:
-            os.killpg(proc.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        print(json.dumps({"error": f"pid-fileを書き込めません（serverは停止しました）: {e}"}, ensure_ascii=False))
+        # server側をSIGTERM→SIGKILLで確実に片付けてからエラーにする
+        stopped, _ = terminate_group(proc.pid)
+        Path(args.pid_file).unlink(missing_ok=True)  # 部分書き込みの残骸も消す
+        print(json.dumps({
+            "error": f"pid-fileを準備できません（serverは{'停止しました' if stopped else '停止できていません — 手動確認が必要'}）: {e}",
+        }, ensure_ascii=False))
         return 1
 
     # 即死検知: コマンドのタイポ・ポート衝突は起動直後に死ぬ。ready待ちのタイムアウト
@@ -88,10 +113,14 @@ def stop(args) -> int:
     raw = pid_file.read_text().strip()
     try:
         info = json.loads(raw)
-        pgid, lstart = int(info["pid"]), info.get("lstart", "")
+        pgid, lstart = info["pid"], info["lstart"]
+        # 厳密検証: lstartが欠落/空だと再利用ガードが素通りし、検証なしのkillpgになる。
+        # boolはintのサブクラスなのでJSONのtrue/falseも弾く
+        if isinstance(pgid, bool) or not isinstance(pgid, int) or not isinstance(lstart, str) or not lstart:
+            raise ValueError("必須フィールドが不正")
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-        # serve_ctl start が書いた形式以外は扱わない（数値のみ等の不明な形式で
-        # 検証なしのkillpgをすると、pid再利用時に無関係プロセスを殺しうる）
+        # serve_ctl start が書いた形式以外は扱わない（検証なしのkillpgは
+        # pid再利用時に無関係プロセスを殺しうるため、killせずエラーに倒す）
         print(json.dumps({"stopped": False, "forced": False,
                           "note": f"pid-fileがserve_ctlの形式ではありません。手動確認が必要: {raw[:80]}"},
                          ensure_ascii=False))
@@ -102,7 +131,7 @@ def stop(args) -> int:
         return 1
 
     current_lstart = pid_lstart(pgid)
-    if group_alive(pgid) and current_lstart and lstart and current_lstart != lstart:
+    if group_alive(pgid) and current_lstart and current_lstart != lstart:
         # リーダーpidが生きているが起動時刻が違う = server自然死後のpid再利用。無関係プロセスをkillしない。
         # （current_lstart が空 = リーダーだけ死んで子が同一PGIDで残存しているケース。これは自分たちの
         #   残骸なので通常どおりkillpgに進む。PGIDはグループ生存中は別プロセスに再割当てされない）
@@ -111,22 +140,7 @@ def stop(args) -> int:
                           "note": "pidが別プロセスに再利用されていたためkillせず終了（serverは既に停止済み）"},
                          ensure_ascii=False))
         return 0
-    forced = False
-    try:
-        os.killpg(pgid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and group_alive(pgid):
-        time.sleep(0.2)
-    if group_alive(pgid):
-        forced = True
-        try:
-            os.killpg(pgid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        time.sleep(0.5)
-    stopped = not group_alive(pgid)
+    stopped, forced = terminate_group(pgid)
     if stopped:
         pid_file.unlink(missing_ok=True)
     print(json.dumps({"stopped": stopped, "forced": forced}))

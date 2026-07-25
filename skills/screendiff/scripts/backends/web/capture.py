@@ -142,7 +142,8 @@ def main() -> int:
     args = parser.parse_args()
 
     # \d はPythonでは全角数字にもマッチするため [0-9] を明示し、値域も検証する
-    vp = re.fullmatch(r"([0-9]+)x([0-9]+)", args.viewport, re.ASCII)
+    # （桁数上限はint変換の巨大数値エラーを正規表現段階で防ぐため）
+    vp = re.fullmatch(r"([0-9]{1,5})x([0-9]{1,5})", args.viewport, re.ASCII)
     if not vp or not (1 <= int(vp.group(1)) <= 10000 and 1 <= int(vp.group(2)) <= 10000):
         print(f"ERROR: --viewport は WxH 形式（各1〜10000）で指定してください（例 1280x800）: {args.viewport}",
               file=sys.stderr)
