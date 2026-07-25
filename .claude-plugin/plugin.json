@@ -1,7 +1,7 @@
 {
   "name": "screendiff",
   "version": "0.1.0",
-  "description": "UI変更PRをBefore/After実キャプチャで視覚比較するスキル。base/PRブランチを各々ビルド・撮影し、比較HTMLを生成する",
+  "description": "UI変更PRを Before/After の実キャプチャで視覚比較する plugin。base/PRブランチを各々ビルド・撮影し、比較HTMLを生成する",
   "author": {
     "name": "tsubotax",
     "url": "https://github.com/tsubotax"

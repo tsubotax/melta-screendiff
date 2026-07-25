@@ -9,7 +9,7 @@
     {
       "name": "screendiff",
       "source": "./",
-      "description": "UI変更PRをBefore/After実キャプチャで視覚比較するスキル（web / iOS backend）"
+      "description": "UI変更PRを Before/After の実キャプチャで視覚比較する plugin（web / iOS backend、PRコメントはHITL）"
     }
   ]
 }
