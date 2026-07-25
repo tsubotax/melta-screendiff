@@ -1,0 +1,12 @@
+{
+  "name": "screendiff",
+  "version": "0.1.0",
+  "description": "UI変更PRをBefore/After実キャプチャで視覚比較するスキル。base/PRブランチを各々ビルド・撮影し、比較HTMLを生成する",
+  "author": {
+    "name": "tsubotax",
+    "url": "https://github.com/tsubotax"
+  },
+  "homepage": "https://github.com/tsubotax/melta-screendiff",
+  "license": "MIT",
+  "keywords": ["pr-review", "visual-diff", "screenshot", "melta"]
+}

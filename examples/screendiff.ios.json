@@ -1,0 +1,16 @@
+{
+  "backend": "ios",
+  "target_file_patterns": ["(^|/)Sections/.*View[A-Za-z0-9]*\\.swift$"],
+  "output_dir": "output/screendiff",
+  "ios": {
+    "build_command": "cd app/ios && make build",
+    "app_path": "app/ios/build/Debug-iphonesimulator/App.app",
+    "bundle_id": "com.example.app",
+    "deeplink": "myapp://screen/{id}",
+    "simulator_device": "iPhone 17 Pro",
+    "generated_project_file": "app/ios/App.xcodeproj/project.pbxproj"
+  },
+  "screens": {
+    "resolver_command": "python3 scripts/my_registry_resolver.py"
+  }
+}

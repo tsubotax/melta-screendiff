@@ -1,0 +1,21 @@
+{
+  "backend": "web",
+  "target_file_patterns": ["^src/(pages|components|features)/.*\\.(tsx|jsx|vue|svelte|astro|css)$"],
+  "output_dir": "output/screendiff",
+  "web": {
+    "setup_command": "npm ci",
+    "serve_command": "npm run dev",
+    "serve_url": "http://localhost:5173",
+    "ready_timeout_sec": 60,
+    "viewport": "1280x800",
+    "full_page": true,
+    "settle_ms": 2000
+  },
+  "screens": {
+    "route_map": [
+      { "file_pattern": "^src/pages/index\\.", "id": "home", "path": "/", "title": "ホーム" },
+      { "file_pattern": "^src/pages/about/", "id": "about", "path": "/about", "title": "About" },
+      { "file_pattern": "^src/components/Header", "id": "home", "path": "/", "title": "ホーム" }
+    ]
+  }
+}

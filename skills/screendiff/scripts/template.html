@@ -1,0 +1,237 @@
+<title>PR#{{PR_NUMBER}} Before/After — {{PR_TITLE}}</title>
+<style>
+  :root {
+    --bg: #f6f5f2;
+    --panel: #ffffff;
+    --ink: #1e1e22;
+    --ink-soft: #55565c;
+    --line: #e4e2dc;
+    --accent: #5073f0;
+    --accent-soft: #e9edfd;
+    --good: #1a8f5c;
+    --bad: #d0483a;
+    --new: #2a9d5c;
+    --mono: "SF Mono", ui-monospace, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", "Yu Gothic", sans-serif;
+    padding: 40px 24px 80px;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+
+  header { margin-bottom: 32px; }
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--accent);
+    background: var(--accent-soft);
+    padding: 5px 12px;
+    border-radius: 999px;
+    margin-bottom: 14px;
+  }
+  h1 {
+    font-size: 24px;
+    font-weight: 700;
+    margin: 0 0 8px;
+    letter-spacing: -0.01em;
+  }
+  .sub {
+    color: var(--ink-soft);
+    font-size: 14px;
+    line-height: 1.7;
+  }
+  .sub code {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    background: #efeee9;
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+
+  .meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 18px;
+  }
+  .meta-chip {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 9px 14px;
+    font-size: 13px;
+  }
+  .meta-chip .k { color: var(--ink-soft); }
+  .meta-chip .v { font-weight: 600; }
+  .meta-chip .v.ok { color: var(--good); }
+  .meta-chip .v.bad { color: var(--bad); }
+
+  .toc {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 24px 0;
+  }
+  .toc a {
+    font-size: 12.5px;
+    color: var(--ink-soft);
+    text-decoration: none;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 6px 12px;
+  }
+  .toc a:hover { border-color: var(--accent); color: var(--accent); }
+
+  .screen-card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 24px;
+    margin-bottom: 24px;
+    scroll-margin-top: 20px;
+  }
+  .screen-card-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 6px;
+    flex-wrap: wrap;
+  }
+  .screen-card-head h2 {
+    font-size: 16px;
+    font-weight: 700;
+    margin: 0;
+  }
+  .badge {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    padding: 3px 9px;
+    border-radius: 6px;
+    text-transform: uppercase;
+  }
+  .badge.official { background: #e9edfd; color: var(--accent); }
+  .badge.exploring { background: #fff3d6; color: #a3730b; }
+  .badge.archived { background: #ececea; color: #6a6b70; }
+  .badge.new { background: #e3f6ea; color: var(--new); }
+  .badge.removed { background: #fbe4e1; color: var(--bad); }
+  .badge.lint-ng { background: #fbe4e1; color: var(--bad); }
+  .screen-id {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-soft);
+    margin-bottom: 14px;
+  }
+
+  .compare {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+  .compare.single-column { grid-template-columns: 1fr; max-width: 480px; }
+  @media (max-width: 760px) {
+    .compare { grid-template-columns: 1fr; }
+  }
+  .col-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .col-tag {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    padding: 3px 9px;
+    border-radius: 6px;
+    text-transform: uppercase;
+  }
+  .col-tag.before { background: #ececea; color: #6a6b70; }
+  .col-tag.after { background: var(--accent); color: #fff; }
+
+  .page-block { margin-bottom: 16px; }
+  .page-block:last-child { margin-bottom: 0; }
+  .page-num {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ink-soft);
+    font-family: var(--mono);
+  }
+  .page-note {
+    margin-top: 12px;
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--ink-soft);
+    background: #f4f3ef;
+    border-radius: 8px;
+    padding: 8px 12px;
+  }
+
+  .shot-frame {
+    background: #fafaf8;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 8px;
+  }
+  .shot-frame img { width: 100%; display: block; border-radius: 10px; }
+  .shot-frame.empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 200px;
+    color: var(--ink-soft);
+    font-size: 13px;
+  }
+
+  .screen-desc {
+    margin-top: 14px;
+    font-size: 13.5px;
+    line-height: 1.7;
+    color: var(--ink);
+  }
+  .screen-desc b { color: var(--accent); }
+
+  footer {
+    margin-top: 40px;
+    font-size: 12px;
+    color: var(--ink-soft);
+    text-align: center;
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">melta-screendiff</div>
+    <h1>PR #{{PR_NUMBER}} — {{PR_TITLE}}</h1>
+    <div class="sub">
+      <code>{{BASE_REF}}</code>（Before）と <code>{{HEAD_REF}}</code>（After, このPR）を同一環境でビルド・目視比較。
+      <a href="{{PR_URL}}">{{PR_URL}}</a>
+    </div>
+    <div class="meta-row">
+      <div class="meta-chip"><span class="k">Afterビルド</span><span class="v {{BUILD_STATUS_CLASS}}">{{BUILD_STATUS}}</span></div>
+      <div class="meta-chip"><span class="k">検証</span><span class="v {{VALIDATION_STATUS_CLASS}}">{{VALIDATION_STATUS}}</span></div>
+      <div class="meta-chip"><span class="k">対象画面数</span><span class="v">{{SCREEN_COUNT}}</span></div>
+      <div class="meta-chip"><span class="k">生成日時</span><span class="v">{{GENERATED_AT}}</span></div>
+    </div>
+  </header>
+
+  <div class="toc">
+    {{TOC_LINKS}}
+  </div>
+
+  {{SCREEN_CARDS}}
+
+  <footer>melta-screendiff により自動生成。ビジュアル比較の妥当性はレビュー担当者が目視確認済み。</footer>
+</div>

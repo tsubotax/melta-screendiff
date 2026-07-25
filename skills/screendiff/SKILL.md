@@ -1,0 +1,357 @@
+---
+name: screendiff
+description: UI変更PRについて、PRのbaseブランチ（Before）とPRブランチ（After）をそれぞれビルド・実キャプチャしてBefore/After比較HTMLを生成、PRコメント下書きも作る（投稿はHITL）。トリガー:「PRレビューして」「PRの差分見せて」「Before/After比較」「screendiff」「このPRビルドしてチェック」。対象リポジトリに .claude/screendiff.json（またはユーザー側 ~/.config/melta-screendiff/<repo>.json）の設定が必要。UI変更を含まないPR、静的コードレビューだけで足りるPRには使わない。受け取りレビューのほか、PR作者が自分のPRに比較Artifactを添付するauthorモードあり。
+user-invocable: true
+---
+
+# PR画面差分レビュー（screendiff）
+
+UI変更PRについて、Before（PRのbase branch）/After（PRブランチ）を実際にビルド・キャプチャして視覚比較し、レビューを支援する。軽量・高速に「このPRで画面がどう変わったか」を見せることが目的。
+
+各処理の入出力は `${CLAUDE_PLUGIN_ROOT}/docs/contracts.md` のJSON契約に従う（設定サンプルは `${CLAUDE_PLUGIN_ROOT}/examples/`）。決定論的な処理はすべて `scripts/` に任せ、このファイルは判断・分岐・エラー時の振る舞いだけを規定する。
+
+最初にスクリプトのルートと対象PR番号を確定する。PR番号はスキル引数から取り、**正の整数であることを確認**する（無ければユーザーに聞く）:
+
+```bash
+SCRIPTS="${CLAUDE_PLUGIN_ROOT}/skills/screendiff/scripts"
+PR=<引数のPR番号>   # 例: /screendiff:screendiff 42 → PR=42
+```
+
+## authorモード（PR作者が自分のPRに比較Artifactを添付する場合）
+
+PR作成直後に作者自身がレビュー材料を添付する用途。Phase 0〜5 は通常どおり実行し、**Phase 6（レビューコメント下書き）はスキップ**する。代わりに:
+
+1. Phase 5 の比較Artifactを発行したら、**Artifact 共有トグルを ON** にするようユーザーに促す（共有OFFのままではレビュアーが開けない。トグルはAI側から操作できないため人間の1クリックが必須）
+2. 共有ONの確認後、Artifact URL を `gh pr edit "$PR" --body-file ...` でPR本文の「概要」直下に追記する（例: `【Before/After比較（実キャプチャ）】{URL}`）
+3. 新規画面でBefore側に対象画面が存在しない場合は、Afterキャプチャのみの片側Artifactでよい（比較HTMLに「新規画面のためAfterのみ」と明記される）
+
+## 前提1: PR番号は全コマンドに明示的に渡す
+
+`$PR` を対象PR番号として、`gh pr diff "$PR"`、`gh pr view "$PR"`、`gh pr checkout "$PR"`、`gh pr comment "$PR" --body-file ...` のように必ず番号を明示する。「現在チェックアウト中のブランチに紐づくPR」への暗黙依存は、ブランチを行き来する本スキルでは必ず壊れる。
+
+## 前提2: コマンドは失敗したら即座に止まる
+
+`git checkout`/`git fetch`等は失敗しても後続のシェルコマンドがそのまま実行され続ける。**複数コマンドを1回のBash実行にまとめる場合は必ず`&&`で連結する**か、1コマンドずつ実行して都度終了確認する。「checkoutが失敗したのにbuildだけ実行されてしまい、Beforeのつもりで実際はAfterを撮ってしまう」事故を防ぐため、特にブランチ切り替え直後は成否を明示確認してから進める:
+
+```bash
+git checkout --detach "<ref>" && echo "CHECKOUT_OK" || { echo "CHECKOUT_FAILED — 中断してCleanupへ"; }
+```
+
+## 前提3: 全てのパスは`$REPO_ROOT`基準の絶対パスにする
+
+サブディレクトリにcdして作業する場面があり、cwdによって相対パスの意味が変わる（誤ったネスト`app/output/...`を`app/`配下に作る事故の実例あり）。スキル開始時に一度だけ取得する:
+
+```bash
+REPO_ROOT=$(git rev-parse --show-toplevel)
+```
+
+以降、出力先・アプリパスは全て`$REPO_ROOT`基準の絶対パスで組み立てる。
+
+## Phase 0: 設定解決
+
+```bash
+CONFIG_JSON=$(mktemp -t screendiff-config)   # 固定パスは並行セッションで上書きされるため使わない
+python3 "$SCRIPTS/load_config.py" --repo-root "$REPO_ROOT" > "$CONFIG_JSON" \
+  && echo "CONFIG_OK" || echo "CONFIG_NG"
+cat "$CONFIG_JSON"
+```
+
+CONFIG_NGなら、出力の `error` / `searched` / `details` / `hint` を提示して終了する（対象リポジトリにコミットできない場合はユーザー側 `~/.config/melta-screendiff/<repo名>.json` を案内。`${CLAUDE_PLUGIN_ROOT}/examples/` にサンプルあり）。以降、config値は `<config.xxx>` と表記する。`OUT_DIR="$REPO_ROOT/<config.output_dir>/$PR"`（output_dirが絶対パスならそのまま）。
+
+## Phase 1: 適用範囲判定 + 事前安全性チェック + 退避
+
+```bash
+gh pr diff "$PR" --name-only
+```
+
+`<config.target_file_patterns>` のいずれかにマッチするファイルが0件なら「このPRは対象UIファイルの変更を含まないため対象外です」と報告してここで終了する（ビルド等は一切走らせない）。
+
+続けて安全性チェック:
+
+```bash
+ORIGINAL_REF=$(git branch --show-current)
+[ -n "$ORIGINAL_REF" ] || ORIGINAL_REF=$(git rev-parse HEAD)   # detached HEAD開始でもCleanupで必ず戻れるようにSHAを入れる
+echo "ORIGINAL_REF=$ORIGINAL_REF"
+git status --porcelain
+```
+
+- 作業ツリーに変更（untracked含む）がある場合、内容を提示しユーザーに確認する。「PRと無関係だから無視してよい」と判断しても、後続の`git checkout`（別コミットへのdetached checkout）はそのファイルに競合があると失敗する。無関係と判断した場合でも、ユーザー確認の上で一時退避する:
+
+```bash
+git stash push -u -m "screendiff-$PR-autostash"
+```
+
+- `<config.ios.generated_project_file>` が設定されている場合、その事前dirty状態も控える（`git diff --quiet -- <path>; echo "gen_pre_dirty=$?"`）。Phase 3/4で自動破棄してよいかの判定に使う。
+
+stashしたかどうか（`STASHED=true/false`）を必ず控えておく。**Cleanup（本ファイル末尾）で必ず`git stash pop`する。**
+
+## Phase 2: PRメタデータ取得・画面解決
+
+```bash
+gh pr view "$PR" --json number,title,url,baseRefName,headRefName,body,state,mergedAt,mergeCommit,headRefOid
+```
+
+### マージ済みPRの分岐（重要）
+
+`state` が `MERGED` の場合、**`gh pr checkout`は使わない**（マージ後にリモートのPRブランチが削除され失敗することがある）。**Afterは`headRefOid`ではなく、マージコミット自体（`mergeCommit.oid`）を使う**（`headRefOid`はPRブランチ分岐後にbase側で加わった変更を含まない/巻き戻った状態のことがあり、base側差分の混入を実測済み。マージコミットこそが実際にbaseへ適用された正しい状態）:
+
+```bash
+MERGE_OID=$(gh pr view "$PR" --json mergeCommit --jq '.mergeCommit.oid')
+git cat-file -e "$MERGE_OID^{commit}" 2>/dev/null || git fetch origin "$MERGE_OID"   # ローカル未取得・shallow cloneでも動かす
+PARENT_COUNT=$(git log -1 --format=%P "$MERGE_OID" | wc -w | tr -d ' ') && echo "PARENT_COUNT=$PARENT_COUNT"
+```
+
+- `PARENT_COUNT` が **1でも2でもない**（0＝`git log`失敗含む）場合は中断してCleanupへ進み、状態を報告する（fetch失敗・OID不正の可能性）。
+- `PARENT_COUNT` が **2**（通常のmerge commit）の場合のみ自動処理する。親1がbase側（Beforeの基準）であることを`git log --oneline --graph -3 "$MERGE_OID"`で目視確認してから、Afterは`$MERGE_OID`、Beforeは`${MERGE_OID}^1`を使う。
+- `PARENT_COUNT` が **1**（squash mergeやrebase merge）の場合、Beforeの自動特定は信頼できない（PRが複数コミットのrebase mergeだと`^1`は「1つ前のPRコミット」でありBeforeではない）。**推測せず中断し、ユーザーにbase branch当時のコミットSHAを確認する。**
+
+`state` が `OPEN` の場合は通常どおり:
+
+```bash
+gh pr checkout "$PR" && echo "CHECKOUT_OK" || { echo "CHECKOUT_FAILED — ORIGINAL_REFのままです"; }
+git branch --show-current   # 実際にチェックアウトされたブランチ名を控える
+```
+
+CHECKOUT_FAILEDの場合はCleanupへ進み終了する。
+
+### 画面解決
+
+対象ファイル（Phase 1でマッチしたもの）を渡して解決する。**`<config.screens.resolver_command>` が設定されていればそのコマンドを直接実行し**（引数に変更ファイル群を渡す。出力は同じJSON契約）、無ければ同梱のroute_map版を使う:
+
+```bash
+# resolver_command がある場合（リポジトリ側実装のadapter）
+(cd "$REPO_ROOT" && <config.screens.resolver_command> <変更ファイル...>)
+# 無い場合（同梱のroute_map版）
+python3 "$SCRIPTS/resolve_screens.py" --config-json "$CONFIG_JSON" <変更ファイル...>
+```
+
+- 出力の `resolved` から `screen_id`/`title`/`path` を取得し、全画面を一覧提示する。
+- `unresolved` が出た場合や0件の場合は、**推測せずユーザーに直接確認する。**
+- 新規/削除画面の判定: base側に画面（ルート/レジストリエントリ）が存在しなければ `kind: new`、After側に無ければ `kind: removed`。判定できる情報が無ければユーザーに確認する。全画面が新規ならPhase 4の本体処理はスキップするが、**Cleanupは必ず実行する**。
+
+## Phase 3: After取得
+
+### web backend
+
+```bash
+[ -n "<config.web.setup_command>" ] && (cd "$REPO_ROOT" && <config.web.setup_command>)
+```
+
+**serve前の事前チェック（stale server対策・重要）**: `<config.web.serve_url>` が**起動前から既に応答する場合は中断**し、ユーザーに確認する。ユーザーが別ターミナルで立てている dev server は今checkoutしているrefのコードを配信している保証がなく、「Afterのつもりで別バージョンを撮る」事故になる（iOS backendのstale binary対策と同型）。
+
+```bash
+curl -s -o /dev/null --max-time 2 "<config.web.serve_url>" && echo "PORT_BUSY — 中断してユーザー確認" || echo "PORT_FREE"
+mkdir -p "$OUT_DIR"
+python3 "$SCRIPTS/backends/web/serve_ctl.py" start \
+  --cmd "<config.web.serve_command>" --cwd "$REPO_ROOT" \
+  --log "$OUT_DIR/serve-after.log" --pid-file "$OUT_DIR/serve.pid" && echo "SERVE_STARTED"
+```
+
+serverの起動・停止は必ず `serve_ctl.py` を使う（`( cmd ) &` + PGID kill の自前管理は、非対話シェルでは呼び出し元シェルを道連れにする事故が実測済み）。
+
+各画面を撮影する（capture.py内で疎通待ち＋対象URLのHTTPステータス検証をする）。configの値を**全て**引数に渡し、**必ず `$REPO_ROOT` を cwd にして**実行する（npxが対象リポのdevDependencyのPlaywrightをcwdから解決するため。別のcwdだと無言でChromeフォールバックに落ちる）。stdout JSONはファイルに保存してから読む（成否echoと混ざるのを防ぐ）:
+
+```bash
+(cd "$REPO_ROOT" && python3 "$SCRIPTS/backends/web/capture.py" \
+  --url "<config.web.serve_url><screen.path>" --screen-id "<screen_id>" \
+  --out-dir "$OUT_DIR" --prefix after \
+  --viewport "<config.web.viewport>" --settle-ms <config.web.settle_ms> \
+  --wait-ready-sec <config.web.ready_timeout_sec> \
+  <config.web.full_page が false なら --no-full-page>) \
+  > "$OUT_DIR/capture-after-<screen_id>.json" \
+  && echo "CAPTURE_OK" || echo "CAPTURE_FAILED"
+cat "$OUT_DIR/capture-after-<screen_id>.json"
+```
+
+CAPTURE_FAILEDの画面は「取得失敗」としてmanifestに載せず、ユーザーに報告する（他の画面の処理は継続してよい）。
+
+全画面の撮影が終わったら**必ずserverを止める**（次のcheckoutの前に。動いたままだと Before 側で別refのコードを配信し続ける）。serve_ctl が子プロセスごとSIGTERM→SIGKILLし、**ポートが空いたことまで確認**する:
+
+```bash
+python3 "$SCRIPTS/backends/web/serve_ctl.py" stop --pid-file "$OUT_DIR/serve.pid" && echo "SERVER_STOPPED" || echo "STOP_FAILED"
+curl -s -o /dev/null --max-time 2 "<config.web.serve_url>" && echo "STILL_ALIVE" || echo "PORT_FREE"
+```
+
+STOP_FAILED または STILL_ALIVE の場合は**先へ進まず**状態をユーザーに提示する（別refのserverを撮る事故になるため）。
+
+### ios backend
+
+```bash
+(cd "$REPO_ROOT" && <config.ios.build_command>)
+```
+
+失敗したら中断し、ビルドエラー内容を報告した上でCleanupへ進む（Afterのビルド失敗はPRのバグの可能性が高い）。
+
+`<config.ios.generated_project_file>` が設定されていれば:
+
+```bash
+git diff -- <config.ios.generated_project_file> | python3 "$SCRIPTS/backends/ios/generated_project_diff_guard.py"
+```
+
+`verdict` が `SAFE` かつ Phase 1で事前clean（`gen_pre_dirty=0`）だった場合のみ `git checkout -- <path>` で破棄する。事前dirty、または `ATTENTION` の場合は**絶対に自動破棄しない**（生成ツールのバージョン差ノイズとユーザーの意図的変更を区別できないため）。提示のみに留め、Phase 6のコメント下書き候補にメモする。
+
+各screen idについて、**stale binary対策として必ず `uninstall → install` を明示的に挟んでから**撮影する（「アプリが入っているか」しか見ない条件付きインストールは、ブランチ切替後に前のバイナリのまま撮影する事故を起こす）:
+
+```bash
+SIM_UDID=$(xcrun simctl list devices available -j | python3 -c "import sys,json; ds=json.load(sys.stdin)['devices']; found=[d['udid'] for r in sorted(ds.keys(),reverse=True) for d in ds[r] if d['name']=='<config.ios.simulator_device>' and d['isAvailable']]; print(found[0] if found else '')")
+[ -n "$SIM_UDID" ] || { echo "ERROR: simulator not found — 中断してCleanupへ"; }
+xcrun simctl boot "$SIM_UDID" 2>&1 | grep -v "Unable to boot device in current state: Booted" || true
+xcrun simctl bootstatus "$SIM_UDID" -b && echo "BOOT_OK" || echo "BOOT_FAILED — 中断してCleanupへ"
+xcrun simctl uninstall "$SIM_UDID" "<config.ios.bundle_id>" || true
+xcrun simctl install "$SIM_UDID" "$REPO_ROOT/<config.ios.app_path>" && echo "INSTALL_OK" || echo "INSTALL_FAILED"
+```
+
+simulator未検出・BOOT_FAILEDは中断してCleanupへ。INSTALL_FAILEDの場合はその側の撮影を**行わず**「取得失敗」として報告する（stale binaryのまま撮る事故防止。前提2のfail-fastをここでも適用する）。INSTALL_OKの場合のみ:
+
+```bash
+mkdir -p "$OUT_DIR"
+python3 "$SCRIPTS/backends/ios/paged_capture.py" \
+  --udid "$SIM_UDID" --screen-id "<screen_id>" --deeplink "<config.ios.deeplink>" \
+  --out-dir "$OUT_DIR" --prefix after \
+  > "$OUT_DIR/capture-after-<screen_id>.json" \
+  && echo "CAPTURE_OK" || echo "CAPTURE_FAILED"
+cat "$OUT_DIR/capture-after-<screen_id>.json"
+```
+
+CAPTURE_FAILEDの画面は「取得失敗」としてmanifestに載せず、ユーザーに報告する（他の画面の処理は継続してよい）。
+
+さらに、sim-use があればAXラベル重複チェックを画面ごとに実行する（`--prefix` に合わせた別ファイル名。**同名だとAfter結果を上書きする**）:
+
+```bash
+AX_OUT="$OUT_DIR/ax-dup-after-<screen_id>.json"
+if ! command -v sim-use >/dev/null; then
+  echo "AX_CHECK_SKIPPED"   # ← skipped 確定。以降のコマンドは実行しない
+else
+  { xcrun simctl openurl "$SIM_UDID" "<deeplinkの{id}を置換したURL>" && sleep 2 \
+    && sim-use describe-ui --udid "$SIM_UDID" \
+       | python3 "$SCRIPTS/backends/ios/ax_dup_check.py" > "$AX_OUT"; } \
+    && echo "AX_CHECK_OK" || echo "AX_CHECK_FAILED"
+fi
+cat "$AX_OUT" 2>/dev/null
+```
+
+- `openurl` の失敗も `&&` 連鎖で `AX_CHECK_FAILED` に落とす（前の画面を検査して `passed` 扱いになる事故を防ぐ）。deep linkで開き直してから実行する（paged_capture後はスクロール末尾の状態のため）。
+- 画面ごとに `ax_check_status` を必ず4値のどれかで記録する: `skipped` / `failed` / `duplicates` / `passed`。**failed/skippedをpassed扱いで省略しない**。manifestの該当画面 `description` 末尾に含め、Phase 6の備考にも転記する。
+- 既存画面（kind: changed）はBefore側でも同じチェックを実行し（`ax-dup-before-<screen_id>.json`）、Beforeにも同じ重複がある場合は「既存の重複（PR起因ではない）」と明記する。
+
+### lint（backend共通・任意）
+
+`<config.lint_command>` が設定されていれば、**PRの変更ファイル限定**で実行する（リポジトリ全体の監査は既存警告が多くノイズになる。「このPRが持ち込む違反」だけを浮かせる）:
+
+```bash
+gh pr diff "$PR" --name-only | <target_file_patternsでフィルタ> | xargs <config.lint_command> || true
+```
+
+検出があればPhase 6のコメント下書きに件数と代表例を記載する。
+
+## Phase 4: Before取得
+
+全画面が新規（`kind: new`）ならこのフェーズの本体処理をスキップする（Cleanupには必ず進む）。
+
+```bash
+cd "$REPO_ROOT"
+```
+
+- **OPENなPR**: `git fetch origin "<baseRefName>" && git checkout --detach FETCH_HEAD && echo "CHECKOUT_OK" || echo "CHECKOUT_FAILED"`（`git checkout origin/<baseRefName>`だとfetch直後でもstaleなremote-trackingを踏むことがあるため`FETCH_HEAD`を使う）
+- **MERGED済みPR（PARENT_COUNT=2）**: `git checkout --detach "${MERGE_OID}^1" && echo "CHECKOUT_OK" || echo "CHECKOUT_FAILED"`（fetch不要。マージコミット自体がローカル履歴に含まれている）
+
+CHECKOUT_FAILEDの場合はCleanupへ進み、「Beforeブランチ取得に失敗したためAfterのみの比較になります」と報告する。
+
+CHECKOUT_OKなら、Phase 3と同じbackend手順を `--prefix before` で実行する。ただし:
+
+- 撮影は「既存」判定された画面のみ（新規画面はBeforeが存在しない）。
+- **Beforeのビルド/起動失敗は「PR起因ではない可能性が高い」旨を明記し、Afterのみの比較として継続する**（スキル全体は失敗させない。Cleanupには進む）。
+- webは**serverを必ず立て直す**（Phase 3で止めた状態から。事前のPORT_BUSYチェックも再度行う）。撮影後また止める。
+- iosのgenerated_project_fileガードもPhase 3と全く同様に実行する（破棄せず持ち越すとCleanupでの復帰後にdirtyとして残る）。
+
+## Phase 5: 比較HTML生成 + Artifact提示
+
+各画面のbefore/after PNG（**全ページ**。スクロール下部の変更を見落とさない）をReadツールで実際に確認し、1〜2行の変更点コメントを`description`として書く（プレーンテキスト。render側でHTMLエスケープされる）。
+
+manifest.json（契約は `docs/contracts.md` §4）を`$OUT_DIR`に組み立てる。`*_paths` にはcapture JSONの `files` をページ順のまま渡し、`truncated`/`fallback_single`/`paging_failed` フラグも同JSONから転記する（**失敗を成功偽装しない**。フラグは比較HTMLに警告表示される）:
+
+```bash
+python3 "$SCRIPTS/render_comparison.py" \
+  --manifest "$OUT_DIR/manifest.json" \
+  --output "$OUT_DIR/comparison.html"
+```
+
+生成された `comparison.html` を Artifact として提示する（Artifact機能が無い環境ではローカルでブラウザ表示）。画像は生成時にbase64埋め込み済みなので追加変換は不要。
+
+## Phase 6: PRコメント下書き → HITL → 投稿
+
+マージ済みPRの場合、コメント投稿の要否をユーザーに確認する（マージ後のコメントは実務的意味が薄いことが多い）。
+
+以下の下書きを組み立て、**全文をそのままチャットに提示**する:
+
+```markdown
+## 🎨 Before/After 画面レビュー（screendiff）
+
+このPRで変更された画面を Before / After でビルド・比較しました。
+
+### 変更画面
+| 画面ID | 画面名 | 変更内容 |
+|---|---|---|
+| `<screen_id>` | <title> | <1-2行の差分要約> |
+
+### ビルド
+- After: <✅ SUCCEEDED / ❌ FAILED>
+- Before: <✅ / ❌ / スキップ（新規画面のため）>
+
+### 検証
+- <lint等の結果。実行していなければ「—」>
+
+### 備考
+- <AXチェック結果・生成ファイル差分ATTENTION等、あれば>
+
+---
+🤖 このコメントは melta-screendiff が生成しました。
+```
+
+「この内容で `gh pr comment "$PR"` を投稿してよいですか？」と明示確認し、承認が出るまで絶対に投稿しない。修正要望があれば直して再提示する。承認後のみ実行:
+
+```bash
+gh pr comment "$PR" --body-file "$OUT_DIR/comment-draft.md"
+```
+
+**このHITLゲートは省略不可。**
+
+## Cleanup（正常終了・早期終了・エラー中断のいずれでも必ず実行する）
+
+Phase 1〜6のどのタイミングで処理を打ち切っても（対象外PRでの早期終了を除く — その場合はまだ何も動かしていない）、ユーザーへの最終報告を出す**前**に必ず次を実行する:
+
+```bash
+# webでserverが生きていれば止める（pid-fileが無ければno-op）
+python3 "$SCRIPTS/backends/web/serve_ctl.py" stop --pid-file "$OUT_DIR/serve.pid" || true
+cd "$REPO_ROOT"
+git checkout "$ORIGINAL_REF" && echo "RETURN_OK" || echo "RETURN_FAILED — 状態を確認して手動対応が必要"
+git branch --show-current   # ORIGINAL_REFと一致するか確認
+```
+
+Phase 1で`STASHED=true`だった場合、続けて:
+
+```bash
+git stash pop
+```
+
+RETURN_FAILEDの場合、および`stash pop`がコンフリクトした場合は、**黙って進まず**現在のgit状態（`git status`, `git stash list`）をそのまま提示してユーザーに判断を仰ぐ。
+
+## エッジケース
+
+| ケース | 扱い |
+|---|---|
+| 対象UIファイル変更を含まないPR | Phase 1で早期終了（Cleanup不要、まだ何も動かしていない） |
+| 設定ファイルが無い | Phase 0で終了、セットアップ手順を案内 |
+| Afterビルド/起動失敗 | 中断、エラー内容を報告してCleanupへ |
+| Beforeビルド/起動失敗 | PR起因でない旨を明記しAfterのみで継続、最後にCleanupへ |
+| serve_urlが起動前から応答する（web） | 中断してユーザー確認（stale server事故防止） |
+| lint検出あり | 比較は継続、HTML/コメント下書き双方で明記 |
+| 新規/削除画面 | 該当側をスキップし単カラム表示 |
+| 全画面が新規 | Phase 4の本体処理はスキップ、Cleanupは実行 |
+| 画面解決0件/unresolved | 推測せずユーザーに確認 |
+| 作業ツリーが汚れている | 内容提示しユーザー確認、必要ならstash |
+| 生成プロジェクトファイルが事前dirty | 自動破棄せず提示のみ |
+| マージ済み・親2つのmerge commit | headRefOidではなくmergeCommit.oidをAfter、`^1`をBefore |
+| マージ済み・親1つ（squash/rebase） | Before自動特定を諦め、ユーザーにbase側コミットを確認 |
+| `git checkout`/`git fetch`失敗 | 後続を実行せず即中断・Cleanupへ進み状態を報告 |
+| Cleanupでの復帰・stash pop失敗 | 黙って進まず`git status`/`git stash list`を提示し判断を仰ぐ |

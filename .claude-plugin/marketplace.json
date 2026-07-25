@@ -1,0 +1,15 @@
+{
+  "name": "melta",
+  "description": "Melta のツール群 — UI変更PRのBefore/After視覚比較レビューなど",
+  "owner": {
+    "name": "tsubotax",
+    "url": "https://github.com/tsubotax"
+  },
+  "plugins": [
+    {
+      "name": "screendiff",
+      "source": "./",
+      "description": "UI変更PRをBefore/After実キャプチャで視覚比較するスキル（web / iOS backend）"
+    }
+  ]
+}
