@@ -13,18 +13,20 @@ TESTS=(
   backends/ios/test_ax_dup_check.py
 )
 
+LOG=$(mktemp -t screendiff-test) || exit 1
+trap 'rm -f "$LOG"' EXIT
+
 failed=0
 for t in "${TESTS[@]}"; do
   echo "── $t"
-  if ! python3 "$t" > /tmp/screendiff-test-$$.log 2>&1; then
+  if ! python3 "$t" > "$LOG" 2>&1; then
     failed=1
     echo "❌ FAILED: $t"
-    cat /tmp/screendiff-test-$$.log
+    cat "$LOG"
   else
-    tail -1 /tmp/screendiff-test-$$.log
+    tail -1 "$LOG"
   fi
 done
-rm -f /tmp/screendiff-test-$$.log
 
 if [ "$failed" -eq 0 ]; then
   echo "✅ 全テスト PASSED"

@@ -142,6 +142,55 @@ class TestNoTracebackOnMalformedConfig(unittest.TestCase):
         self._assert_clean_error(
             _with(WEB_OK, screens={"resolver_command": 42}), 'resolver_command は文字列です')
 
+    def test_invalid_utf8_bytes(self):
+        """JSONの中身以前に、ファイルがUTF-8として読めないケース"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'screendiff.json'
+            path.write_bytes(b'{"backend": "\xff\xfe"}')
+            proc = subprocess.run([sys.executable, str(SCRIPT), '--config', str(path)],
+                                  capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 1)
+        self.assertNotIn('Traceback', proc.stderr)
+        self.assertIn('UTF-8', proc.stdout)
+
+    def test_serve_url_unparseable(self):
+        """urlparse 自体が ValueError を投げるURL（IPv6の括弧が閉じていない等）"""
+        self._assert_clean_error(
+            _with(WEB_OK, web={"serve_command": "x", "serve_url": "http://["}),
+            'URLとして解釈できません')
+
+    def test_serve_url_nonnumeric_port(self):
+        """検証を通すと後段の urlopen が InvalidURL で落ちる"""
+        self._assert_clean_error(
+            _with(WEB_OK, web={"serve_command": "x", "serve_url": "http://localhost:notaport"}),
+            'URLとして解釈できません')
+
+    def test_huge_number_literal(self):
+        """int変換上限に当たる巨大な数値は JSONDecodeError ではない ValueError になる"""
+        self._assert_clean_error('{"backend": ' + '9' * 5000 + '}', 'JSONが不正')
+
+    def test_broken_section_does_not_hide_independent_errors(self):
+        """壊れたセクションで早期returnすると、同時に直せるエラーが欠落する"""
+        code, res = _run_config({
+            "backend": "web", "target_file_patterns": [], "web": "bad", "screens": {"route_map": []},
+        })
+        self.assertEqual(code, 1)
+        details = json.dumps(res['json'], ensure_ascii=False)
+        self.assertIn('web はオブジェクトです', details)
+        self.assertIn('target_file_patterns が空です', details)
+        self.assertIn('resolver_command のどちらかが必要です', details)
+
+    def test_config_path_is_a_directory(self):
+        """exists() はディレクトリでも True を返すため read_text で IsADirectoryError になる"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / '.claude' / 'screendiff.json'
+            path.mkdir(parents=True)
+            proc = subprocess.run([sys.executable, str(SCRIPT), '--repo-root', tmp],
+                                  capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 1)
+        self.assertNotIn('Traceback', proc.stderr)
+        self.assertIn('読み込めません', proc.stdout)
+
 
 class TestShippedExamples(unittest.TestCase):
     """同梱サンプルが検証を通る（サンプルが動かないのは導入時の信頼を落とす）"""

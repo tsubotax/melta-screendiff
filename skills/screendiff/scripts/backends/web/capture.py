@@ -14,9 +14,18 @@ iOS backend の paged_capture.py と同じ出力契約を満たす。webのフ�
 1枚の縦長PNGになるため pages は常に1（フルページが撮れていれば全域カバー済み）。
 
 撮影前に対象URLを1回GETし、リダイレクト先が要求URLと違えば中断する（要求した画面の
-つもりでログイン画面等を撮る事故を防ぐ）。⚠️ 検知できるのはHTTPレベルのリダイレクト
-のみ。JSによるクライアントサイド遷移やSPAの404フォールバック（200を返す）は素通りする
-ため、比較HTMLでの目視確認は引き続き必要。
+つもりでログイン画面等を撮る事故を防ぐ）。
+
+⚠️ **この検査には3つの限界がある**。いずれも「撮れた＝要求した画面」を保証しない:
+  1. HTTPレベルのリダイレクトしか見えない。JSによるクライアントサイド遷移や、SPAの
+     404フォールバック（存在しないパスでも200 + シェルHTMLを返す）は素通りする
+  2. 疎通確認は urllib、撮影はPlaywright/Chromeと**別プロセス・別User-Agent**。
+     UAで応答を変えるサーバーなら、urllib には200を返しつつブラウザだけログイン画面へ
+     飛ばす、という食い違いが起こりうる。final_url は「urllib から見た最終URL」であって
+     撮影実体ではない
+  3. fragment（hash route）はサーバーに送られないため検証できない
+これらを機械的に潰すには、撮影自体をブラウザAPIに移して実行後の location.href と
+DOM を見る必要がある（別タスク）。それまでは比較HTMLの目視確認が最終防衛線。
 
 使い方:
     python3 capture.py --url <URL> --screen-id <id> \
@@ -43,6 +52,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlparse
 
 CHROME_CANDIDATES = [
     os.environ.get("CHROME_BIN", ""),
@@ -93,8 +103,23 @@ def probe(url: str, timeout_sec: int) -> tuple[int | None, str | None, str | Non
 
 
 def same_url(a: str, b: str) -> bool:
-    """末尾スラッシュのみの差は同一とみなす（ディレクトリ index への正規化リダイレクト）。"""
-    return a.rstrip("/") == b.rstrip("/")
+    """要求URLと最終URLが同じ画面を指すか判定する。
+
+    path 末尾のスラッシュのみの差は同一とみなす（ディレクトリ index への正規化
+    リダイレクト）。⚠️ 正規化は **path にだけ** 適用する。URL全体に rstrip("/")
+    をかけると "?tab=/" → "?tab=" のようなクエリ値の変化まで同一と誤判定する。
+
+    scheme / netloc は厳密比較する（localhost と 127.0.0.1 は別origin。cookieや
+    storageの意味が変わる）。query も厳密比較する。
+
+    fragment は比較しない。サーバーに送られずHTTP応答にも現れないため、要求URLに
+    hash があると必ず不一致になってしまう（hash router の検証はHTTPレベルでは
+    不可能で、ブラウザ実行後でないと判定できない）。
+    """
+    pa, pb = urlparse(a), urlparse(b)
+    if (pa.scheme, pa.netloc, pa.query) != (pb.scheme, pb.netloc, pb.query):
+        return False
+    return pa.path.rstrip("/") == pb.path.rstrip("/")
 
 
 def playwright_available() -> bool:

@@ -87,15 +87,27 @@ def candidate_paths(repo_root: Path) -> list[Path]:
 
 
 def validate_serve_url(serve_url) -> list[str]:
-    """serve_url がスキーム + ホストを持つURLか検証する（prefix一致だけでは "http://" が通る）。"""
+    """serve_url がスキーム + ホスト + 妥当なポートを持つURLか検証する。
+
+    prefix一致だけでは "http://" が通る。一方 urlparse 自体も不正URL
+    （"http://[" 等）で ValueError を投げるため、ここで整形エラーに変換する。
+    ポートは urlparse では検証されず、後段の urlopen が InvalidURL で落ちるので
+    ここで見る。
+    """
     if not isinstance(serve_url, str):
-        errors = [f"web.serve_url は文字列です: {type(serve_url).__name__}"]
-        return errors
-    parsed = urlparse(serve_url)
+        return [f"web.serve_url は文字列です: {type(serve_url).__name__}"]
+    try:
+        parsed = urlparse(serve_url)
+        hostname = parsed.hostname
+        port = parsed.port  # 非数値ポートはここで ValueError
+    except ValueError as e:
+        return [f"web.serve_url がURLとして解釈できません: {serve_url!r} ({e})"]
     if parsed.scheme not in ("http", "https"):
         return [f'web.serve_url のスキームは "http" | "https" です: {serve_url!r}']
-    if not parsed.hostname:
+    if not hostname:
         return [f"web.serve_url にホストがありません: {serve_url!r}"]
+    if port is not None and not (1 <= port <= 65535):
+        return [f"web.serve_url のポートが範囲外です: {serve_url!r}"]
     return []
 
 
@@ -106,16 +118,23 @@ def validate(config: dict) -> list[str]:
     traceback を出すと、設定を書き間違えただけの利用者に「プラグインが壊れている」
     と誤認させる（設定の手書きが必要な現設計では最も踏まれやすい経路）。
     """
+    if not isinstance(config, dict):
+        return [f"設定はオブジェクトです: {type(config).__name__}"]
     errors = []
     backend = config.get("backend")
     if backend not in ("web", "ios"):
         errors.append(f'backend は "web" | "ios" のいずれかです: {backend!r}')
-    # セクションが dict でないと以降の .get() が AttributeError になるため先に潰す。
-    # 1つでも壊れていたら以降は辿らず返す（誤ったエラーを積み増さない）
-    section_errors = [f"{s} はオブジェクトです: {type(config.get(s)).__name__}"
-                      for s in ("web", "ios", "screens") if not isinstance(config.get(s), dict)]
-    if section_errors:
-        return errors + section_errors
+    # セクションが dict でないと以降の .get() が AttributeError になる。壊れた
+    # セクションの内部検証だけを飛ばし、独立した項目の検証は続ける（1回の実行で
+    # 直せるエラーをまとめて出す。早期returnにすると修正→再実行の往復が増える）
+    sections = {}
+    for name in ("web", "ios", "screens"):
+        value = config.get(name)
+        if isinstance(value, dict):
+            sections[name] = value
+        else:
+            errors.append(f"{name} はオブジェクトです: {type(value).__name__}")
+            sections[name] = {}
     patterns = config.get("target_file_patterns")
     if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
         errors.append("target_file_patterns は文字列の配列です")
@@ -128,7 +147,7 @@ def validate(config: dict) -> list[str]:
                 re.compile(pattern)
             except re.error as e:
                 errors.append(f"target_file_patterns[{i}] の正規表現が不正です: {pattern!r} ({e})")
-    screens = config.get("screens", {})
+    screens = sections["screens"]
     route_map = screens.get("route_map", [])
     if not isinstance(route_map, list):
         errors.append("screens.route_map は配列です")
@@ -165,14 +184,14 @@ def validate(config: dict) -> list[str]:
     if not route_map and not resolver:
         errors.append("screens.route_map か screens.resolver_command のどちらかが必要です")
     if backend == "web":
-        web = config["web"]
+        web = sections["web"]
         if not web.get("serve_command"):
             errors.append("web.serve_command が必要です")
         elif not isinstance(web["serve_command"], str):
             errors.append(f"web.serve_command は文字列です: {type(web['serve_command']).__name__}")
         errors.extend(validate_serve_url(web.get("serve_url")))
     if backend == "ios":
-        ios = config["ios"]
+        ios = sections["ios"]
         for key in ("build_command", "app_path", "bundle_id", "deeplink", "simulator_device"):
             if not ios.get(key):
                 errors.append(f"ios.{key} が必要です")
@@ -183,9 +202,22 @@ def validate(config: dict) -> list[str]:
 
 
 def load_from(path: Path) -> int:
+    # 読み込み自体の失敗も traceback にしない（パスがディレクトリ・権限なし・
+    # 不正なUTF-8バイト列など。exists() はディレクトリでも True を返す）
     try:
-        user_config = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
+        raw = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        print(json.dumps({"error": f"設定ファイルがUTF-8として読めません: {path} ({e})"},
+                         ensure_ascii=False))
+        return 1
+    except OSError as e:
+        print(json.dumps({"error": f"設定ファイルを読み込めません: {path} ({e})"}, ensure_ascii=False))
+        return 1
+    try:
+        # JSONDecodeError だけでなく ValueError 全般を捕まえる（巨大な数値リテラルは
+        # int 変換上限に当たり JSONDecodeError ではない ValueError になる）
+        user_config = json.loads(raw)
+    except ValueError as e:
         print(json.dumps({"error": f"設定ファイルのJSONが不正です: {path} ({e})"}, ensure_ascii=False))
         return 1
     if not isinstance(user_config, dict):
