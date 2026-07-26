@@ -39,6 +39,13 @@ DEFAULTS = {
     # （例: "npm run clean --if-present"）。パスを限定しない広域削除は書かないこと
     # （stash pop で戻した untracked ファイルまで巻き込む）
     "cleanup_command": None,
+    # 比較結果の配布方法。
+    #   "artifact" … 比較HTMLを Artifact として発行し、PRへの書き込み（本文編集・コメント
+    #                投稿）まで進む既定フロー
+    #   "local"    … comparison.html のローカル生成で完了する。Artifact 発行も PR への
+    #                書き込みも一切しない（配布は人間が手で行う）。外部への公開経路が
+    #                使えない/使うべきでない案件向け
+    "share_mode": "artifact",
     "web": {
         # 任意: 各サイドの checkout 直後に1回実行（依存インストール等）
         "setup_command": None,
@@ -141,6 +148,9 @@ def validate(config: dict) -> list[str]:
         else:
             errors.append(f"{name} はオブジェクトです: {type(value).__name__}")
             sections[name] = {}
+    share_mode = config.get("share_mode")
+    if share_mode not in ("artifact", "local"):
+        errors.append(f'share_mode は "artifact" | "local" のいずれかです: {share_mode!r}')
     # SKILL.md 側でシェルコマンドとして実行されるため、非文字列・空文字を通さない。
     # 空文字を許すと「設定したつもりで何も走らない」状態が黙って成立する
     for key in ("lint_command", "cleanup_command"):

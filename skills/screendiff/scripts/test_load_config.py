@@ -100,14 +100,26 @@ class TestSilentAccidentGuards(unittest.TestCase):
         self.assertEqual(res['json']['web']['serve_url'], 'http://localhost:5173')
 
 
-class TestOptionalCommands(unittest.TestCase):
+class TestOptionalCommandsAndShareMode(unittest.TestCase):
     """後から足した任意キーが、既存設定を壊さず・黙って無効化されないか"""
 
     def test_defaults_are_backward_compatible(self):
         """既存の設定ファイル（新キー無し）がそのまま通り、既定値が入る"""
         code, res = _run_config(WEB_OK)
         self.assertEqual(code, 0)
+        self.assertEqual(res['json']['share_mode'], 'artifact')  # 既定は従来フロー
         self.assertIsNone(res['json']['cleanup_command'])
+
+    def test_share_mode_local_is_accepted(self):
+        code, res = _run_config(_with(WEB_OK, share_mode='local'))
+        self.assertEqual(code, 0)
+        self.assertEqual(res['json']['share_mode'], 'local')
+
+    def test_unknown_share_mode_is_rejected(self):
+        """タイポを黙って artifact にフォールバックさせない（PRに書き込むかどうかの分岐）"""
+        code, res = _run_config(_with(WEB_OK, share_mode='slack'))
+        self.assertEqual(code, 1)
+        self.assertIn('share_mode', json.dumps(res['json'], ensure_ascii=False))
 
     def test_cleanup_command_string_is_accepted(self):
         code, res = _run_config(_with(WEB_OK, cleanup_command='npm run clean --if-present'))

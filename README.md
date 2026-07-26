@@ -121,6 +121,22 @@ Before/After を撮り終えて元のブランチに戻っても、**gitignore �
 
 **広域削除を書かないこと。** `git clean -fdx` のようなコマンドは、直前の `git stash pop` で復元した untracked ファイルや、比較HTMLを置いた `output_dir` まで消す。消す対象はパスで限定する。
 
+### 比較結果をPRに書き込まない（`share_mode: "local"`）
+
+既定（`"artifact"`）では比較HTMLを Artifact として発行し、PR本文への追記やコメント投稿まで進む。閲覧者が Artifact の共有経路にアクセスできない場合や、比較画像を外部の共有面に置くべきでない案件では `local` を使う:
+
+```json
+"share_mode": "local"
+```
+
+`local` では **comparison.html をローカルに生成して絶対パスを提示するところで完了**する。Artifact の発行も、`gh pr comment` / `gh pr edit` によるPRへの書き込みも一切行わない。生成されたHTMLをどこへ配るか（チャットに添付する、ブラウザで開いて画面共有する、社内ドライブに置く）は人間が手で決める — 配布のHITLをAI側に持ち込まない設計にしてある。
+
+実行時に上書きもできる:
+
+```
+/screendiff:screendiff 42 --share local
+```
+
 ### route_map の必須項目
 
 web backend では `route_map` の各エントリに **`path`（"/" 始まり）が必須**。省略すると撮影URLが `serve_url` そのもの（＝トップページ）になり、「変更された画面」としてトップを撮ったまま気づけないため、設定読み込み時にエラーで落とす。認証が必要な画面はログイン画面にリダイレクトされた時点で中断する（現状、認証状態を持ち込む仕組みは未対応）。

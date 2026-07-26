@@ -1,6 +1,6 @@
 ---
 name: screendiff
-description: UI変更PRについて、PRのbaseブランチ（Before）とPRブランチ（After）をそれぞれビルド・実キャプチャしてBefore/After比較HTMLを生成、PRコメント下書きも作る（投稿はHITL）。トリガー:「PRレビューして」「PRの差分見せて」「Before/After比較」「screendiff」「このPRビルドしてチェック」。対象リポジトリに .claude/screendiff.json（またはユーザー側 ~/.config/melta-screendiff/<repo>.json）の設定が必要。UI変更を含まないPR、静的コードレビューだけで足りるPRには使わない。受け取りレビューのほか、PR作者が自分のPRに比較Artifactを添付するauthorモードあり。
+description: UI変更PRについて、PRのbaseブランチ（Before）とPRブランチ（After）をそれぞれビルド・実キャプチャしてBefore/After比較HTMLを生成、PRコメント下書きも作る（投稿はHITL）。トリガー:「PRレビューして」「PRの差分見せて」「Before/After比較」「screendiff」「このPRビルドしてチェック」。対象リポジトリに .claude/screendiff.json（またはユーザー側 ~/.config/melta-screendiff/<repo>.json）の設定が必要。UI変更を含まないPR、静的コードレビューだけで足りるPRには使わない。受け取りレビューのほか、PR作者が自分のPRに比較Artifactを添付するauthorモードあり。Artifact発行もPRへの書き込みもせず、比較HTMLをローカル生成して終わる local 共有モードもある（外部の共有面に置けない案件向け）。
 user-invocable: true
 ---
 
@@ -17,11 +17,30 @@ SCRIPTS="${CLAUDE_PLUGIN_ROOT}/skills/screendiff/scripts"
 PR=<引数のPR番号>   # 例: /screendiff:screendiff 42 → PR=42
 ```
 
+### 共有モード（`SHARE_MODE`）
+
+比較結果をどう配布するかを最初に確定する。**Phase 7 の分岐に直結し、PRへ書き込むかどうかが変わる**ため、撮影を始める前に決めておく:
+
+| 値 | 挙動 |
+|---|---|
+| `artifact`（既定） | 比較HTMLを Artifact として発行し、PRへの書き込み（本文編集・コメント投稿）まで進む |
+| `local` | comparison.html をローカルに生成して終わり。Artifact発行もPRへの書き込みも一切しない |
+
+決め方（先に決まったものを採用）:
+
+1. スキル引数の明示指定 — `/screendiff:screendiff 42 --share local`（`--share artifact` も同様）。ユーザーが自然文で「Artifactは出さず手元だけで」「PRには書かないで」と指定した場合も `local` として扱う
+2. Phase 0 で読む `<config.share_mode>`
+3. どちらも無ければ `artifact`
+
+`local` を選ぶのは、閲覧者が Artifact の共有経路にアクセスできない場合や、比較画像を外部の共有面に置くべきでない案件の場合。生成したHTMLをどこに配るか（チャットへの添付など）は**人間が手で行う** — 配布のHITLをAI側に持ち込まない。
+
 ## authorモード（PR作者が自分のPRに比較材料を添付する場合）
 
-PR作成直後に作者自身がレビュー材料を添付する用途。Phase 0〜6 は通常どおり実行し、**Phase 7 のレビューコメント下書きはスキップ**する。代わりに Phase 7 の authorモード手順に進む。
+PR作成直後に作者自身がレビュー材料を添付する用途。Phase 0〜6 は通常どおり実行し、**Phase 7 のうちレビューコメント下書き（レビュアーモード）はスキップ**する。代わりに Phase 7 の authorモード手順に進む。
 
 新規画面でBefore側に対象画面が存在しない場合は、Afterキャプチャのみの片側比較でよい（比較HTMLに「新規画面のためAfterのみ」と明記される）。
+
+⚠️ **authorモードでも `SHARE_MODE=local` ならPRへは一切書き込まない**（authorモードは「誰が使うか」、SHARE_MODEは「どこへ配るか」の直交する軸）。localの場合はHTMLのパスを提示して終わり、PR本文への追記はユーザーが手で行う。
 
 ## 前提1: PR番号は全コマンドに明示的に渡す
 
@@ -337,9 +356,21 @@ git stash list
 
 比較HTMLは生成済みなのでそのパスは伝えてよいが、**Artifact発行・PR本文編集・`gh pr comment` 投稿は行わない**（手元が壊れている状態で外向きの操作だけ先に進めない）。
 
-## Phase 7: 共有（Artifact提示 → PRコメント下書き → HITL → 投稿）
+## Phase 7: 共有（`SHARE_MODE` で分岐）
 
-Phase 6 が全て成功した場合のみ進む。生成された `comparison.html` を Artifact として提示する（Artifact機能が無い環境ではローカルでブラウザ表示）。続けてモード別に:
+Phase 6 が全て成功した場合のみ進む。
+
+### `SHARE_MODE=local` の場合
+
+1. `comparison.html` の**絶対パス**（`$OUT_DIR/comparison.html`）を提示する。ブラウザで開く手順も添える
+2. Artifactは発行しない。**PRへの書き込み（`gh pr comment` / `gh pr edit`）は一切しない**
+3. 変更画面の要約（Phase 5 で書いた `description`）はチャットに提示してよい。PRやチャットツールへ貼るかどうかはユーザーが手で決める
+
+ここで終了する。下記のPRコメント下書きには進まない。
+
+### `SHARE_MODE=artifact` の場合
+
+生成された `comparison.html` を Artifact として提示する（Artifact機能が無い環境では絶対パスを提示し、`local` と同じ扱いで終了する）。続けてモード別に:
 
 #### authorモード（PR作者が自分のPRに添付する場合）
 
@@ -406,3 +437,5 @@ gh pr comment "$PR" --body-file "$OUT_DIR/comment-draft.md"
 | マージ済み・親1つ（squash/rebase） | Before自動特定を諦め、ユーザーにbase側コミットを確認 |
 | `git checkout`/`git fetch`失敗 | 後続を実行せず即中断・Cleanupへ進み状態を報告 |
 | Cleanupでの復帰・stash pop・cleanup_command失敗 | 黙って進まず`git status`/`git stash list`を提示し判断を仰ぐ。**Phase 7の共有には進まない** |
+| `SHARE_MODE=local` | comparison.htmlの絶対パス提示で完了。Artifact発行もPRへの書き込みもしない |
+| Artifact機能が使えない環境 | `artifact`指定でも絶対パス提示に倒す（PRへの書き込みはしない） |

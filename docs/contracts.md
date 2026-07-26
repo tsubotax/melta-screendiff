@@ -31,6 +31,7 @@ SKILL.md（オーケストレーション層 / AIが読む手順書）
   "output_dir": "output/screendiff",   // repo-root相対 or 絶対パス
   "lint_command": null,                // 任意。変更ファイル群を引数に取るlint
   "cleanup_command": null,             // 任意。Cleanup成功後にrepo-rootで1回（下記§1.1）
+  "share_mode": "artifact",            // "artifact"（既定） | "local"（下記§1.2）
   "web": {
     "setup_command": null,             // 任意。checkout直後に1回（npm ci 等）
     "serve_command": "npm run dev",    // バックグラウンド起動される
@@ -68,6 +69,9 @@ load_config.py は後段の silent 事故を防ぐため、**確定前に**以�
 - `web` / `ios` / `screens` がオブジェクトであること、`file_pattern` / `id` / `resolver_command` /
   `serve_command` / `ios.*` が文字列であること（**どんな入力でも traceback を出さない**のがこの
   関数の契約。設定を書き間違えただけの利用者に「プラグインが壊れている」と誤認させない）
+- `share_mode` が `"artifact"` | `"local"` のいずれかであること
+  — ⚠️ タイポを既定値へ黙ってフォールバックさせない。「PRに書き込むかどうか」の分岐であり、
+  `"slack"` のような値を無視して `artifact` として実行すると、書き込ませたくないPRに書き込む
 - `lint_command` / `cleanup_command` が文字列または `null` であること（空文字は不可。
   「設定したつもりで何も走らない」状態が黙って成立するため）
 
@@ -94,6 +98,21 @@ Cleanup で **元refへの復帰と `git stash pop` が成功した後にのみ*
 ⚠️ **広域削除を書かないこと。** `git clean -fdx` のようなコマンドは、直前の `git stash pop` で
 復元した untracked ファイルや、比較HTMLを置いた `output_dir` まで消す。削除するならパスを
 限定する（`npm run clean --if-present` のようなリポジトリ側のスクリプトを呼ぶのが安全）。
+
+### 1.2 share_mode
+
+比較結果の配布方法。**PRへ書き込むかどうかを決める設定**であり、撮影内容には影響しない。
+
+| 値 | 挙動 |
+|---|---|
+| `artifact`（既定） | 比較HTMLを Artifact として発行し、PR本文編集・コメント投稿まで進む（従来フロー） |
+| `local` | comparison.html をローカルに生成して終わり。Artifact発行もPRへの書き込みも一切しない |
+
+`local` は「配布先中立」の概念として定義してある。生成されたHTMLをどこへ配るか（チャットへの
+添付・社内共有ドライブ・そのままブラウザで開く）は**人間が手で決める**。特定の配布先を前提にした
+名前を付けない（配布先が変わるたびにモードが増えるのを避ける）。
+
+実行時に `--share local` / `--share artifact` で config を上書きできる（SKILL.md 冒頭で解決）。
 
 ⚠️ **検証で防げないもの**: `serve_command` にSPAフォールバックを持つサーバー（Vite の
 dev / preview は `appType` 既定 `"spa"`、Next.js 等も同様）を指定すると、存在しないパスでも
