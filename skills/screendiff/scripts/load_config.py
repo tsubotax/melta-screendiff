@@ -22,6 +22,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 DEFAULTS = {
     "backend": "web",
@@ -85,12 +86,36 @@ def candidate_paths(repo_root: Path) -> list[Path]:
     ]
 
 
+def validate_serve_url(serve_url) -> list[str]:
+    """serve_url がスキーム + ホストを持つURLか検証する（prefix一致だけでは "http://" が通る）。"""
+    if not isinstance(serve_url, str):
+        errors = [f"web.serve_url は文字列です: {type(serve_url).__name__}"]
+        return errors
+    parsed = urlparse(serve_url)
+    if parsed.scheme not in ("http", "https"):
+        return [f'web.serve_url のスキームは "http" | "https" です: {serve_url!r}']
+    if not parsed.hostname:
+        return [f"web.serve_url にホストがありません: {serve_url!r}"]
+    return []
+
+
 def validate(config: dict) -> list[str]:
-    """後段の KeyError / 不定動作を防ぐ最小限の検証。エラーメッセージのリストを返す。"""
+    """後段の KeyError / 不定動作を防ぐ最小限の検証。エラーメッセージのリストを返す。
+
+    ⚠️ どんな入力でも例外を投げず、必ずエラー文字列のリストを返すこと。ここで
+    traceback を出すと、設定を書き間違えただけの利用者に「プラグインが壊れている」
+    と誤認させる（設定の手書きが必要な現設計では最も踏まれやすい経路）。
+    """
     errors = []
     backend = config.get("backend")
     if backend not in ("web", "ios"):
         errors.append(f'backend は "web" | "ios" のいずれかです: {backend!r}')
+    # セクションが dict でないと以降の .get() が AttributeError になるため先に潰す。
+    # 1つでも壊れていたら以降は辿らず返す（誤ったエラーを積み増さない）
+    section_errors = [f"{s} はオブジェクトです: {type(config.get(s)).__name__}"
+                      for s in ("web", "ios", "screens") if not isinstance(config.get(s), dict)]
+    if section_errors:
+        return errors + section_errors
     patterns = config.get("target_file_patterns")
     if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
         errors.append("target_file_patterns は文字列の配列です")
@@ -112,6 +137,10 @@ def validate(config: dict) -> list[str]:
             if not isinstance(entry, dict) or not entry.get("file_pattern") or not entry.get("id"):
                 errors.append(f"screens.route_map[{i}] に file_pattern と id が必要です")
                 continue
+            # 非文字列は re.compile で TypeError（re.error では捕まらない）になるため先に弾く
+            if not isinstance(entry["file_pattern"], str) or not isinstance(entry["id"], str):
+                errors.append(f"screens.route_map[{i}] の file_pattern と id は文字列です")
+                continue
             try:
                 re.compile(entry["file_pattern"])
             except re.error as e:
@@ -130,20 +159,26 @@ def validate(config: dict) -> list[str]:
                 elif not path.startswith("/"):
                     errors.append(
                         f'screens.route_map[{i}] (id="{entry["id"]}") の path は "/" 始まりです: {path!r}')
-    if not route_map and not screens.get("resolver_command"):
+    resolver = screens.get("resolver_command")
+    if resolver is not None and not isinstance(resolver, str):
+        errors.append(f"screens.resolver_command は文字列です: {type(resolver).__name__}")
+    if not route_map and not resolver:
         errors.append("screens.route_map か screens.resolver_command のどちらかが必要です")
     if backend == "web":
-        web = config.get("web", {})
+        web = config["web"]
         if not web.get("serve_command"):
             errors.append("web.serve_command が必要です")
-        serve_url = web.get("serve_url")
-        if not isinstance(serve_url, str) or not serve_url.startswith(("http://", "https://")):
-            errors.append(f"web.serve_url は http:// または https:// で始まるURLです: {serve_url!r}")
+        elif not isinstance(web["serve_command"], str):
+            errors.append(f"web.serve_command は文字列です: {type(web['serve_command']).__name__}")
+        errors.extend(validate_serve_url(web.get("serve_url")))
     if backend == "ios":
-        ios = config.get("ios", {})
+        ios = config["ios"]
         for key in ("build_command", "app_path", "bundle_id", "deeplink", "simulator_device"):
             if not ios.get(key):
                 errors.append(f"ios.{key} が必要です")
+            elif not isinstance(ios[key], str):
+                # SKILL.md 側でシェルコマンドに埋め込まれるため、非文字列は通さない
+                errors.append(f"ios.{key} は文字列です: {type(ios[key]).__name__}")
     return errors
 
 

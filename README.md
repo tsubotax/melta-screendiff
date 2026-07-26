@@ -78,6 +78,25 @@ backend別:
 }
 ```
 
+### ⚠️ serve_command に dev server を指定するときの罠
+
+**SPAフォールバックを持つサーバーを指定すると、存在しないパスでも 200 が返る。** 撮影対象がズレていてもエラーにならず、Before/After が同じ画面になって「差分なし」と誤結論する。
+
+Vite は `appType` の既定値が `"spa"` で、**MPA としてビルドしていても dev / preview サーバーは未知のHTMLパスをルートの `index.html` に書き換えて 200 を返す**（`htmlFallbackMiddleware`）。Next.js 等も同様のフォールバックを持つ。
+
+安全側に倒すなら、**ビルド成果物を素の静的サーバーで配信する**（存在しないパスが 404 になり、capture が中断する）:
+
+```json
+"web": {
+  "serve_command": "npm run build && python3 -m http.server 5180 --directory dist",
+  "serve_url": "http://localhost:5180"
+}
+```
+
+`setup_command` と `serve_command` に分けず `&&` で繋ぐのが重要。分けるとビルド失敗時に**前のブランチの `dist/` を配信して別refを撮る**事故になる。
+
+### route_map の必須項目
+
 web backend では `route_map` の各エントリに **`path`（"/" 始まり）が必須**。省略すると撮影URLが `serve_url` そのもの（＝トップページ）になり、「変更された画面」としてトップを撮ったまま気づけないため、設定読み込み時にエラーで落とす。認証が必要な画面はログイン画面にリダイレクトされた時点で中断する（現状、認証状態を持ち込む仕組みは未対応）。
 
 変更ファイル→画面の解決が `route_map`（宣言的マッピング）で足りないリポジトリは、`screens.resolver_command` に自前の逆引きコマンドを指定できる（出力のJSON契約は docs/contracts.md §2）。

@@ -15,6 +15,8 @@ SKILL.md（オーケストレーション層 / AIが読む手順書）
 
 画像はAIのコンテキストを通さない。render_comparison.py がディスク上のPNGを直接base64エンコードしてHTMLに埋める（何十枚撮ってもトークンを消費しない）。
 
+同梱テストは `bash skills/screendiff/scripts/run_tests.sh` で全部走る（Python標準ライブラリのみ。撮影エンジン不要）。**契約を変える変更を入れるときは、対応するテストを先に足すこと** — このスキルは「SKILL.md（AIが読む手順書）」と「scripts（決定論的処理）」の二層で、scripts が静かに壊れてもAIは手順どおり呼び続けて異常に気づかない。テストが唯一の防波堤になる。
+
 ## 1. config（load_config.py の出力）
 
 探索順: `--config` 明示 → `<repo>/.claude/screendiff.json` → `~/.config/melta-screendiff/<repo名>.json`。
@@ -60,6 +62,14 @@ load_config.py は後段の silent 事故を防ぐため、**確定前に**以�
   — ⚠️ 省略を許すと resolve_screens.py が空文字を返し、撮影URLが `serve_url` そのもの（＝トップページ）になる。エラーも出ないまま「変更された画面」としてトップを撮り、Before/Afterが一致して「差分なし」と誤結論する
 - `web.serve_url` が `http://` / `https://` で始まること（末尾スラッシュは出力時に除去され、`serve_url + path` の連結が二重スラッシュにならない）
 - 設定ファイルの最上位がJSONオブジェクトであること
+- `web` / `ios` / `screens` がオブジェクトであること、`file_pattern` / `id` / `resolver_command` /
+  `serve_command` / `ios.*` が文字列であること（**どんな入力でも traceback を出さない**のがこの
+  関数の契約。設定を書き間違えただけの利用者に「プラグインが壊れている」と誤認させない）
+
+⚠️ **検証で防げないもの**: `serve_command` にSPAフォールバックを持つサーバー（Vite の
+dev / preview は `appType` 既定 `"spa"`、Next.js 等も同様）を指定すると、存在しないパスでも
+200 とルートの `index.html` が返り、撮影対象がズレても検知できない。ビルド成果物を素の静的
+サーバーで配信すると 404 になり capture が中断する（README の「serve_command の罠」参照）。
 
 ## 2. resolver 契約（resolve_screens.py / resolver_command）
 
