@@ -137,6 +137,8 @@ Before/After を撮り終えて元のブランチに戻っても、**gitignore �
 /screendiff:screendiff 42 --share local
 ```
 
+どのアクションを許すかは `share_plan.py` が確定させる（モード × author/reviewer × Artifact可否）。`local` ではPRへの書き込みが `forbidden` に入り、分岐の読み違いで投稿が走らないようにしてある。
+
 ### route_map の必須項目
 
 web backend では `route_map` の各エントリに **`path`（"/" 始まり）が必須**。省略すると撮影URLが `serve_url` そのもの（＝トップページ）になり、「変更された画面」としてトップを撮ったまま気づけないため、設定読み込み時にエラーで落とす。認証が必要な画面はログイン画面にリダイレクトされた時点で中断する（現状、認証状態を持ち込む仕組みは未対応）。

@@ -9,6 +9,7 @@ SKILL.md（オーケストレーション層 / AIが読む手順書）
         ├── resolve_screens.py   変更ファイル → 画面解決（route_map）
         ├── validate_resolved.py resolver出力の契約検証（撮影前ゲート）
         ├── preflight_base.py    base先行チェック（撮影前ゲート・OPEN PRのみ）
+        ├── share_plan.py        共有モード解決 → 許可/禁止アクション確定
         ├── render_comparison.py manifest.json → base64埋め込み比較HTML
         ├── run_cleanup.py       cleanup_command の実行（Cleanupフェーズ）
         └── backends/
@@ -73,8 +74,10 @@ load_config.py は後段の silent 事故を防ぐため、**確定前に**以�
 - `share_mode` が `"artifact"` | `"local"` のいずれかであること
   — ⚠️ タイポを既定値へ黙ってフォールバックさせない。「PRに書き込むかどうか」の分岐であり、
   `"slack"` のような値を無視して `artifact` として実行すると、書き込ませたくないPRに書き込む
-- `lint_command` / `cleanup_command` が文字列または `null` であること（空文字は不可。
-  「設定したつもりで何も走らない」状態が黙って成立するため）
+- `lint_command` / `cleanup_command` が文字列または `null` であること
+  — `cleanup_command` は空文字も不可（「設定したつもりで何も走らない」状態が黙って成立する）。
+  `lint_command` の空文字は本キー導入以前から素通りしていたため、落とさず `null` へ正規化する
+  （既存設定が Phase 0 で動かなくなるのを避ける。扱いは「未設定」で確定させる）
 
 ### 1.1 cleanup_command
 
@@ -87,7 +90,7 @@ Cleanup で **元refへの復帰と `git stash pop` が成功した後にのみ*
 `run_cleanup.py` の出力（stdout, JSON）と終了コード:
 
 ```jsonc
-{"status": "skipped"}                        // 未設定。exit 0（設定していないリポジトリでは何も起きない）
+{"status": "skipped"}                        // 未設定(null)。exit 0。空文字は error（load_config と揃える）
 {"status": "succeeded", "exit_code": 0, ...} // exit 0
 {"status": "failed", "exit_code": 3, ...}    // exit 1。stdout_tail / stderr_tail に末尾2000字
 {"status": "error", "error": "..."}          // exit 1。config不正・repo-root不在など実行前の失敗
@@ -113,7 +116,26 @@ Cleanup で **元refへの復帰と `git stash pop` が成功した後にのみ*
 添付・社内共有ドライブ・そのままブラウザで開く）は**人間が手で決める**。特定の配布先を前提にした
 名前を付けない（配布先が変わるたびにモードが増えるのを避ける）。
 
-実行時に `--share local` / `--share artifact` で config を上書きできる（SKILL.md 冒頭で解決）。
+実行時に `--share local` / `--share artifact` で config を上書きできる。解決と
+アクション確定は `share_plan.py` が行う（Phase 7 の入口）:
+
+```jsonc
+{
+  "share_mode": "local", "source": "実行時の明示指定", "author_mode": false,
+  "effective": "local",           // "artifact" | "local" | "artifact_unavailable"
+  "allow_artifact": false, "allow_pr_write": false,
+  "actions": ["comparison.html の絶対パスを提示する", "..."],
+  "forbidden": ["Artifact の発行", "gh pr comment", "gh pr edit"]
+}
+```
+
+**分岐を散文に置かないのが要点**。`local` は「PRに書き込まないこと」自体が目的の機能で、
+読み違い1回で取り消せない書き込みが起きる（撮影対象がズレる silent 事故と違い、外向きで
+不可逆）。SKILL.md は `actions` を実行し、`forbidden` は理由を問わず実行しない。
+
+`--no-artifact`（Artifact機能が使えない環境）は `local` に落とさず `artifact_unavailable`
+として**PR書き込みも止める**。Artifact URL を作れないのに「比較はArtifactにあります」と
+PR本文へ書くと、リンク先の無い案内が残るため。
 
 ⚠️ **検証で防げないもの**: `serve_command` にSPAフォールバックを持つサーバー（Vite の
 dev / preview は `appType` 既定 `"spa"`、Next.js 等も同様）を指定すると、存在しないパスでも

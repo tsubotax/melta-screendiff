@@ -139,11 +139,17 @@ class TestOptionalCommandsAndShareMode(unittest.TestCase):
         self.assertIn('cleanup_command は文字列です', json.dumps(res['json'], ensure_ascii=False))
 
     def test_non_string_lint_command_is_rejected(self):
-        """lint_command も同じ経路（シェルに埋め込まれる）なので同じ扱い"""
+        """lint_command も同じ経路（シェルに埋め込まれる）なので型は同じ扱い"""
         code, res = _run_config(_with(WEB_OK, lint_command=1))
         self.assertEqual(code, 1)
         self.assertNotIn('Traceback', res['stderr'])
         self.assertIn('lint_command は文字列です', json.dumps(res['json'], ensure_ascii=False))
+
+    def test_empty_lint_command_is_normalized_not_rejected(self):
+        """空文字は本キー導入以前から素通りしていた。落とすと既存設定が動かなくなる"""
+        code, res = _run_config(_with(WEB_OK, lint_command=''))
+        self.assertEqual(code, 0, msg=json.dumps(res['json'], ensure_ascii=False))
+        self.assertIsNone(res['json']['lint_command'])  # 「未設定」として明示的に正規化する
 
 
 class TestNoTracebackOnMalformedConfig(unittest.TestCase):

@@ -32,6 +32,8 @@ PR=<引数のPR番号>   # 例: /screendiff:screendiff 42 → PR=42
 2. Phase 0 で読む `<config.share_mode>`
 3. どちらも無ければ `artifact`
 
+明示指定があれば `SHARE_ARG="--share local"` のように控えておく（**この解決とアクション確定は Phase 7 で `share_plan.py` が機械的に行う**。ここで決めるのは「ユーザーが何を指定したか」だけ）。
+
 `local` を選ぶのは、閲覧者が Artifact の共有経路にアクセスできない場合や、比較画像を外部の共有面に置くべきでない案件の場合。生成したHTMLをどこに配るか（チャットへの添付など）は**人間が手で行う** — 配布のHITLをAI側に持ち込まない。
 
 ## authorモード（PR作者が自分のPRに比較材料を添付する場合）
@@ -127,9 +129,14 @@ PARENT_COUNT=$(git log -1 --format=%P "$MERGE_OID" | wc -w | tr -d ' ') && echo 
 ```bash
 gh pr checkout "$PR" && echo "CHECKOUT_OK" || { echo "CHECKOUT_FAILED — ORIGINAL_REFのままです"; }
 git branch --show-current   # 実際にチェックアウトされたブランチ名を控える
+# 撮るのが本当にPR先端かを検証する。同名のローカルブランチが既にあり未pushコミットを
+# 持っている場合、gh pr checkout は --force なしではPR先端へリセットしない。その状態で
+# 撮ると「PRに存在しないコミット」をAfterとして撮り、manifestにもそのOIDを記録してしまう
+HEAD_OID=$(git rev-parse HEAD) && echo "HEAD_OID=$HEAD_OID"
+[ "$HEAD_OID" = "<headRefOid>" ] && echo "HEAD_MATCHES_PR" || echo "HEAD_MISMATCH"
 ```
 
-CHECKOUT_FAILEDの場合はCleanupへ進み終了する。
+CHECKOUT_FAILEDの場合はCleanupへ進み終了する。HEAD_MISMATCHの場合も**先へ進まず**、ローカルの差分（`git log --oneline "<headRefOid>..HEAD"`）を提示してユーザーに確認する（未pushコミットを撮るのか、PR先端に合わせるのか。勝手に `--force` で捨てない）。実行中にPR側へpushされた場合も不一致になるので、その場合は再実行を案内する。
 
 ### base先行チェック（OPEN PRのみ・撮影前に必ず）
 
@@ -137,7 +144,6 @@ OPEN PR の Before は「撮影時点の base ブランチ先端」から撮る�
 
 ```bash
 git fetch origin "<baseRefName>" && BASE_OID=$(git rev-parse FETCH_HEAD) && echo "BASE_OID=$BASE_OID"
-HEAD_OID=$(git rev-parse HEAD) && echo "HEAD_OID=$HEAD_OID"
 python3 "$SCRIPTS/preflight_base.py" --repo-root "$REPO_ROOT" \
   --base-oid "$BASE_OID" --head-oid "$HEAD_OID" \
   --base-ref "<baseRefName>" --head-ref "<headRefName>" \
@@ -148,7 +154,10 @@ python3 "$SCRIPTS/preflight_base.py" --repo-root "$REPO_ROOT" \
 - `PREFLIGHT_NG`（`status: error`）は fetch漏れ・OID不正であって「base先行」ではない。原因を提示して中断する（両者を同じ結論に潰さない）
 - `PREFLIGHT_OK` なら `BASE_OID` / `HEAD_OID` を控える。**Phase 4 の Before checkout はこの `BASE_OID` を使い**、Phase 5 で manifest に記録する（後から「どのコミット同士を比べたか」を監査できるようにする）
 
-MERGED PR ではこのチェックは**実行しない**。マージコミットの親から Before を取る経路は比較の基準が既に固定されており、base が動きうるという前提が成り立たない。代わりに `HEAD_OID=$MERGE_OID`、`BASE_OID=$(git rev-parse "${MERGE_OID}^1")` を控えて manifest に記録する。
+MERGED PR ではこのチェックは**実行しない**。マージコミットの親から Before を取る経路は比較の基準が既に固定されており、base が動きうるという前提が成り立たない。代わりに manifest 用のOIDだけ控える:
+
+- `PARENT_COUNT=2`: `HEAD_OID=$MERGE_OID`、`BASE_OID=$(git rev-parse "${MERGE_OID}^1")`
+- `PARENT_COUNT=1`（squash/rebase merge）: **`^1` を BASE_OID にしない。** 上の分岐で「`^1` はBeforeとして信頼できない」と判断した対象そのもので、記録すると誤った監査記録が残る。ユーザーに確認したbase側コミットのSHAを `BASE_OID` にする（確認が取れていなければ `base_oid` は記録しない）
 
 ### 画面解決
 
@@ -329,8 +338,11 @@ manifest.json（契約は `docs/contracts.md` §4）を`$OUT_DIR`に組み立て
 ```bash
 python3 "$SCRIPTS/render_comparison.py" \
   --manifest "$OUT_DIR/manifest.json" \
-  --output "$OUT_DIR/comparison.html"
+  --output "$OUT_DIR/comparison.html" \
+  && echo "COMPARISON_READY=true" || echo "COMPARISON_READY=false"
 ```
+
+⚠️ **`COMPARISON_READY` を必ず控える。** `$OUT_DIR` は `output_dir/$PR` で同じPRの再実行では同じ場所になるため、**前回実行の `comparison.html` が残っている**。Phase 2〜4 で中断した回にファイルの存在だけで判断すると、今回撮っていない古い比較結果を「このPRの比較」として共有してしまう。今回の実行でrenderが成功した場合のみ `true`。**このフェーズに到達せず中断した場合は `false`。**
 
 画像は生成時にbase64埋め込み済みなので追加変換は不要。**生成した時点ではまだ配布しない** — 先に Phase 6（Cleanup）を実行する。作業ツリーが壊れたままPRへ書き込むと、外向きの取り消せない操作だけが進んで手元の破損が放置される。
 
@@ -339,8 +351,11 @@ python3 "$SCRIPTS/render_comparison.py" \
 Phase 1〜5のどのタイミングで処理を打ち切っても（対象UIファイル変更を含まないPRでの早期終了を除く — その場合はまだ何も動かしていない）、**共有（Phase 7）とユーザーへの最終報告の前に**必ず次を実行する:
 
 ```bash
-# webでserverが生きていれば止める（pid-fileが無ければno-op）
-python3 "$SCRIPTS/backends/web/serve_ctl.py" stop --pid-file "$OUT_DIR/serve.pid" || true
+# webでserverが生きていれば止める。pid-fileが無い場合は stopped:true / exit 0 が返る
+# （＝未起動・停止済み）ので、失敗を `|| true` で潰さない。撮影途中の異常終了で
+# serverが残ったまま「Cleanup成功」と扱うと、次の作業が別refのserverを掴む
+python3 "$SCRIPTS/backends/web/serve_ctl.py" stop --pid-file "$OUT_DIR/serve.pid" \
+  && echo "SERVER_STOP_OK" || echo "SERVER_STOP_FAILED"
 cd "$REPO_ROOT"
 git checkout "$ORIGINAL_REF" && echo "RETURN_OK" || echo "RETURN_FAILED — 状態を確認して手動対応が必要"
 git branch --show-current   # ORIGINAL_REFと一致するか確認
@@ -366,20 +381,33 @@ python3 "$SCRIPTS/run_cleanup.py" --config-json "$CONFIG_JSON" --repo-root "$REP
 
 ### 失敗契約
 
-`RETURN_FAILED` / `STASH_POP_FAILED`（コンフリクト含む）/ `CLEANUP_FAILED` のいずれかが出たら、**黙って進まず Phase 7 へ進まない**。現在のgit状態をそのまま提示してユーザーの判断を仰ぐ:
+`SERVER_STOP_FAILED` / `RETURN_FAILED` / `STASH_POP_FAILED`（コンフリクト含む）/ `CLEANUP_FAILED` のいずれかが出たら、**黙って進まず Phase 7 へ進まない**。現在の状態をそのまま提示してユーザーの判断を仰ぐ:
 
 ```bash
 git status
 git stash list
+curl -s -o /dev/null --max-time 2 "<config.web.serve_url>" && echo "SERVER_STILL_ALIVE" || echo "PORT_FREE"   # webのみ
 ```
 
-比較HTMLは生成済みなのでそのパスは伝えてよいが、**Artifact発行・PR本文編集・`gh pr comment` 投稿は行わない**（手元が壊れている状態で外向きの操作だけ先に進めない）。
+`COMPARISON_READY=true` なら比較HTMLのパスは伝えてよい（撮影自体は終わっている）。ただし**Artifact発行・PR本文編集・`gh pr comment` 投稿は行わない**（手元が壊れている状態で外向きの操作だけ先に進めない）。
 
-## Phase 7: 共有（`SHARE_MODE` で分岐）
+## Phase 7: 共有（`share_plan.py` が確定したアクションを実行）
 
-Phase 6 が全て成功した場合のみ進む。
+**`COMPARISON_READY=true` かつ Phase 6 が全て成功した場合のみ**進む。
 
-### `SHARE_MODE=local` の場合
+`COMPARISON_READY=false`（Phase 2〜4 で中断した、renderが失敗した）の場合は**このフェーズに入らない**。Cleanupの結果と中断理由を報告して終了する。`$OUT_DIR` に前回実行の `comparison.html` が残っていても**提示しない**（今回撮っていないものを「このPRの比較」として渡すことになる）。
+
+まず許可アクションを確定する。**分岐を目で追わず、この出力に従う**（PRへの書き込みは外向きで取り消せないため、判断を散文に置かない）:
+
+```bash
+python3 "$SCRIPTS/share_plan.py" --config-json "$CONFIG_JSON" \
+  $SHARE_ARG <authorモードなら --author> <Artifact機能が使えない環境なら --no-artifact> \
+  && echo "PLAN_OK" || echo "PLAN_NG"
+```
+
+`PLAN_NG` なら共有せず、出力の `error` を提示して終了する。`PLAN_OK` なら出力の `actions` を上から実行し、`forbidden` に載っているものは**理由を問わず実行しない**。`effective` が取りうる値は3つ:
+
+### `effective: "local"`
 
 1. `comparison.html` の**絶対パス**（`$OUT_DIR/comparison.html`）を提示する。ブラウザで開く手順も添える
 2. Artifactは発行しない。**PRへの書き込み（`gh pr comment` / `gh pr edit`）は一切しない**
@@ -387,9 +415,13 @@ Phase 6 が全て成功した場合のみ進む。
 
 ここで終了する。下記のPRコメント下書きには進まない。
 
-### `SHARE_MODE=artifact` の場合
+### `effective: "artifact_unavailable"`
 
-生成された `comparison.html` を Artifact として提示する（Artifact機能が無い環境では絶対パスを提示し、`local` と同じ扱いで終了する）。続けてモード別に:
+Artifact 機能が使えない環境で `artifact` が指定された場合。`comparison.html` の絶対パスを提示して終了する。**PRへの書き込みもしない** — Artifact URL を作れないのに「比較はArtifactにあります」とPR本文へ書くと、リンク先の無い案内が残るため。
+
+### `effective: "artifact"`
+
+生成された `comparison.html` を Artifact として提示する。続けてモード別に:
 
 #### authorモード（PR作者が自分のPRに添付する場合）
 
@@ -457,6 +489,8 @@ gh pr comment "$PR" --body-file "$OUT_DIR/comment-draft.md"
 | マージ済み・親2つのmerge commit | headRefOidではなくmergeCommit.oidをAfter、`^1`をBefore |
 | マージ済み・親1つ（squash/rebase） | Before自動特定を諦め、ユーザーにbase側コミットを確認 |
 | `git checkout`/`git fetch`失敗 | 後続を実行せず即中断・Cleanupへ進み状態を報告 |
-| Cleanupでの復帰・stash pop・cleanup_command失敗 | 黙って進まず`git status`/`git stash list`を提示し判断を仰ぐ。**Phase 7の共有には進まない** |
+| Cleanupでのserver停止・復帰・stash pop・cleanup_command失敗 | 黙って進まず`git status`/`git stash list`を提示し判断を仰ぐ。**Phase 7の共有には進まない** |
+| 撮影前・撮影中に中断した（`COMPARISON_READY=false`） | Cleanupは実行、Phase 7には入らない。前回実行の`comparison.html`が残っていても提示しない |
+| `gh pr checkout`後のHEADが`headRefOid`と不一致 | 未pushのローカルコミットを撮る事故。中断してユーザー確認（勝手に`--force`しない） |
 | `SHARE_MODE=local` | comparison.htmlの絶対パス提示で完了。Artifact発行もPRへの書き込みもしない |
 | Artifact機能が使えない環境 | `artifact`指定でも絶対パス提示に倒す（PRへの書き込みはしない） |

@@ -151,16 +151,18 @@ def validate(config: dict) -> list[str]:
     share_mode = config.get("share_mode")
     if share_mode not in ("artifact", "local"):
         errors.append(f'share_mode は "artifact" | "local" のいずれかです: {share_mode!r}')
-    # SKILL.md 側でシェルコマンドとして実行されるため、非文字列・空文字を通さない。
-    # 空文字を許すと「設定したつもりで何も走らない」状態が黙って成立する
+    # SKILL.md 側でシェルコマンドとして実行されるため、非文字列は通さない
     for key in ("lint_command", "cleanup_command"):
         value = config.get(key)
-        if value is None:
-            continue
-        if not isinstance(value, str):
+        if value is not None and not isinstance(value, str):
             errors.append(f"{key} は文字列です: {type(value).__name__}")
-        elif not value.strip():
-            errors.append(f"{key} が空文字です（実行しないなら null にしてください）")
+    # 空文字を許すと「設定したつもりで何も走らない」状態が黙って成立する。ただし
+    # lint_command は本キー導入以前から空文字が素通りしていたため、ここで落とすと
+    # 既存設定が Phase 0 で動かなくなる → 空文字は None へ正規化して扱いを明示する
+    # （新規キーの cleanup_command には既存利用者がいないので厳格に落とす）
+    cleanup_command = config.get("cleanup_command")
+    if isinstance(cleanup_command, str) and not cleanup_command.strip():
+        errors.append("cleanup_command が空文字です（実行しないなら null にしてください）")
     patterns = config.get("target_file_patterns")
     if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
         errors.append("target_file_patterns は文字列の配列です")
@@ -260,6 +262,10 @@ def load_from(path: Path) -> int:
     # （ios backend では serve_url は未検証なので、文字列のときだけ触る）
     if isinstance(merged.get("web", {}).get("serve_url"), str):
         merged["web"]["serve_url"] = merged["web"]["serve_url"].rstrip("/")
+    # 空文字の lint_command は「未設定」として扱う（後方互換。SKILL.md 側の
+    # 「設定されていれば実行する」判定に空文字を渡すと解釈が揺れる）
+    if isinstance(merged.get("lint_command"), str) and not merged["lint_command"].strip():
+        merged["lint_command"] = None
     merged["_config_source"] = str(path)
     print(json.dumps(merged, ensure_ascii=False, indent=2))
     return 0

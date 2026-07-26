@@ -52,6 +52,15 @@ class TestCleanupCommand(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(out['status'], 'skipped')
 
+    def test_empty_string_is_error_not_skipped(self):
+        """空文字は load_config が弾く値。ここで skipped に倒すと成功偽装が復活する"""
+        for value in ('', '   '):
+            with self.subTest(value=repr(value)):
+                code, out, stderr = _run({"cleanup_command": value})
+                self.assertEqual(code, 1)
+                self.assertEqual(out['status'], 'error')
+                self.assertNotIn('Traceback', stderr)
+
     def test_success_runs_in_repo_root(self):
         """成功時は exit 0 かつ、コマンドの cwd が repo-root であること"""
         with tempfile.TemporaryDirectory() as repo:
@@ -107,6 +116,15 @@ class TestCleanupCommand(unittest.TestCase):
         code, out, stderr = _run({"cleanup_command": "true"}, repo_root='/no/such/dir/for/screendiff')
         self.assertEqual(code, 1)
         self.assertEqual(out['status'], 'error')
+        self.assertNotIn('Traceback', stderr)
+
+    def test_non_utf8_output_does_not_break_json_contract(self):
+        """非UTF-8を吐くコマンドでもJSONを返す（デコード例外でtracebackにしない）"""
+        code, out, stderr = _run(
+            {"cleanup_command": r"printf '\xff\xfe broken\n'; exit 4"})
+        self.assertEqual(code, 1)
+        self.assertEqual(out['status'], 'failed')
+        self.assertEqual(out['exit_code'], 4)
         self.assertNotIn('Traceback', stderr)
 
     def test_huge_output_is_truncated(self):
