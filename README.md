@@ -95,6 +95,18 @@ Vite は `appType` の既定値が `"spa"` で、**MPA としてビルドして�
 
 `setup_command` と `serve_command` に分けず `&&` で繋ぐのが重要。分けるとビルド失敗時に**前のブランチの `dist/` を配信して別refを撮る**事故になる。
 
+### ⚠️ モノレポで「前のブランチの成果物」が混入する罠
+
+依存パッケージのビルド成果物が **gitignore されている**場合、`git checkout` してもファイルは消えない。そこで「成果物が無ければビルドする」型のセットアップスクリプト（`if (existsSync(artifact)) continue;`）を通ると、**After 側でビルドした成果物を Before 側のビルドがそのまま使う**。Before に After のコードが混入し、差分が小さく見える。
+
+実運用の npm workspaces モノレポでこれを踏みかけた。回避するには、**依存 workspace のビルドを serve_command で明示的に走らせる**:
+
+```json
+"serve_command": "npm run build --workspace=packages/tokens && npm run build --workspace=packages/ui && npm run build --workspace=apps/preview && python3 -m http.server 5180 --directory apps/preview/dist"
+```
+
+**PRが依存パッケージのソースを変更しうるなら（`target_file_patterns` に含めているなら）、その依存のビルドを毎回強制する。** 存在チェックによるスキップに任せない。
+
 ### route_map の必須項目
 
 web backend では `route_map` の各エントリに **`path`（"/" 始まり）が必須**。省略すると撮影URLが `serve_url` そのもの（＝トップページ）になり、「変更された画面」としてトップを撮ったまま気づけないため、設定読み込み時にエラーで落とす。認証が必要な画面はログイン画面にリダイレクトされた時点で中断する（現状、認証状態を持ち込む仕組みは未対応）。

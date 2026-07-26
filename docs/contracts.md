@@ -93,6 +93,15 @@ dev / preview は `appType` 既定 `"spa"`、Next.js 等も同様）を指定す
 コマンドを `screens.resolver_command` に指定する（リポジトリ側が実装を持つ = adapter方式）。
 **unresolved が出たら呼び出し元は推測せずユーザーに確認する。**
 
+**web backend では `resolved[].path` が必須（非空・"/" 始まり）。** `screen_id` も非空の文字列。
+同じ `screen_id` に異なる `path` を返してはいけない。解決不能なら `resolved` に載せず
+`unresolved` に倒すか、`{"error": ...}` を出して exit 1 にする（0件成功に偽装しない）。
+
+⚠️ load_config.py の path 必須化は **`route_map` にしか効かない**。resolver_command の出力は
+別経路なので、**`validate_resolved.py` を必ず通す**（SKILL.md の Phase 2 で規定）。空 path を
+通すと撮影URLが `serve_url` そのもの＝トップページになり、200が返り title も取れ、Before/After が
+一致して「差分なし」と誤結論する——route_map で潰したのと同型の事故が adapter 経路で再開通する。
+
 ## 3. capture 契約（backends/*/capture系）
 
 入力は backend ごとのCLI引数。出力（stdout, JSON）は全backend共通:

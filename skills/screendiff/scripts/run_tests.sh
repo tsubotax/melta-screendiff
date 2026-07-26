@@ -9,6 +9,7 @@ cd "$(dirname "$0")" || exit 1
 TESTS=(
   test_load_config.py
   test_resolve_screens.py
+  test_validate_resolved.py
   backends/web/test_capture.py
   backends/ios/test_ax_dup_check.py
 )

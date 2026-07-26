@@ -120,10 +120,19 @@ CHECKOUT_FAILEDの場合はCleanupへ進み終了する。
 
 ```bash
 # resolver_command がある場合（リポジトリ側実装のadapter）
-(cd "$REPO_ROOT" && <config.screens.resolver_command> <変更ファイル...>)
+(cd "$REPO_ROOT" && <config.screens.resolver_command> <変更ファイル...>) > "$OUT_DIR/resolved-raw.json"
 # 無い場合（同梱のroute_map版）
-python3 "$SCRIPTS/resolve_screens.py" --config-json "$CONFIG_JSON" <変更ファイル...>
+python3 "$SCRIPTS/resolve_screens.py" --config-json "$CONFIG_JSON" <変更ファイル...> > "$OUT_DIR/resolved-raw.json"
+
+# ⚠️ どちらの経路でも必ず検証を通す（load_config の path 必須化は route_map にしか
+# 効かない。resolver が空pathを返すと serve_url そのもの＝トップページを「その画面」
+# として撮り、Before/Afterが一致して「差分なし」と誤結論する）
+python3 "$SCRIPTS/validate_resolved.py" --config-json "$CONFIG_JSON" "$OUT_DIR/resolved-raw.json" \
+  > "$OUT_DIR/resolved.json" && echo "RESOLVED_OK" || echo "RESOLVED_INVALID"
+cat "$OUT_DIR/resolved.json"
 ```
+
+RESOLVED_INVALID なら**先へ進まず**、出力の `details` を提示してユーザーに確認する（resolver の実装バグを撮影で表面化させない）。
 
 - 出力の `resolved` から `screen_id`/`title`/`path` を取得し、全画面を一覧提示する。
 - `unresolved` が出た場合や0件の場合は、**推測せずユーザーに直接確認する。**
@@ -134,8 +143,15 @@ python3 "$SCRIPTS/resolve_screens.py" --config-json "$CONFIG_JSON" <変更ファ
 ### web backend
 
 ```bash
-[ -n "<config.web.setup_command>" ] && (cd "$REPO_ROOT" && <config.web.setup_command>)
+# 失敗を握り潰さない（setup が落ちたまま進むと、前のrefのビルド成果物を配信して
+# 別refを撮る事故になる）。ビルドは setup_command に置かず serve_command 側に
+# `build && serve` の形で内包する方が構造的に安全（README「serve_command の罠」参照）
+if [ -n "<config.web.setup_command>" ]; then
+  (cd "$REPO_ROOT" && <config.web.setup_command>) && echo "SETUP_OK" || echo "SETUP_FAILED"
+fi
 ```
+
+SETUP_FAILED なら**先へ進まず**Cleanupへ進み、状態を報告する。
 
 **serve前の事前チェック（stale server対策・重要）**: `<config.web.serve_url>` が**起動前から既に応答する場合は中断**し、ユーザーに確認する。ユーザーが別ターミナルで立てている dev server は今checkoutしているrefのコードを配信している保証がなく、「Afterのつもりで別バージョンを撮る」事故になる（iOS backendのstale binary対策と同型）。
 
