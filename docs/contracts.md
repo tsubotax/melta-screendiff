@@ -8,6 +8,7 @@ SKILL.md（オーケストレーション層 / AIが読む手順書）
         ├── load_config.py       設定解決（2段フォールバック）
         ├── resolve_screens.py   変更ファイル → 画面解決（route_map）
         ├── validate_resolved.py resolver出力の契約検証（撮影前ゲート）
+        ├── preflight_base.py    base先行チェック（撮影前ゲート・OPEN PRのみ）
         ├── render_comparison.py manifest.json → base64埋め込み比較HTML
         ├── run_cleanup.py       cleanup_command の実行（Cleanupフェーズ）
         └── backends/
@@ -200,6 +201,12 @@ web backend は撮影前に対象URLを1回GETし、**`final_url` が要求URL�
   "pr_url": "https://github.com/example/app/pull/42",
   "base_ref": "main",
   "head_ref": "feature/home-carousel",
+  // 実際に撮った2コミット（任意だが記録することを強く推奨）。OPEN PRでは preflight_base.py が
+  // 解決したフルOIDをそのまま入れる。MERGED PRでは head=mergeCommit.oid / base=その^1。
+  // 両方が揃っているときだけ比較HTMLのヘッダに短縮OIDが出る（manifest.json はローカルにしか
+  // 残らないため、HTMLだけを受け取った第三者が「何と何を比べたか」を確認できるようにする）
+  "base_oid": "9f1c2b4e5a6d7c8b9a0f1e2d3c4b5a6978890123",
+  "head_oid": "1a2b3c4d5e6f7890abcdef1234567890abcdef12",
   "build_status": "SUCCEEDED",         // "SUCCEEDED"を含めばok表示
   "validation_status": "",             // 任意（lint/DS検証等の要約。"PASSED"/"ERROR 0"でok表示）
   "generated_at": "2026-07-24T16:00:00+09:00",
@@ -221,4 +228,27 @@ web backend は撮影前に対象URLを1回GETし、**`final_url` が要求URL�
 ```
 
 旧schema（`before_path`/`after_path` 単数キー、`ds_validation_status`、`ds_error_count`）も
-後方互換で読める。
+後方互換で読める。`base_oid`/`head_oid` が無い manifest もそのまま描画できる（チップが出ないだけ）。
+
+## 5. preflight 契約（preflight_base.py）
+
+OPEN PR の Before は「撮影時点の base ブランチ先端」から撮る。base が PR の分岐後に進んでいると、
+**Before に他PRのマージ結果が入り、PRが加えていない差分が比較に混ざる**。撮影後にOIDを記録しても
+比較そのものの正しさは戻らない（記録は監査であって訂正ではない）ため、**撮影前**に確定させる。
+
+```jsonc
+{
+  "status": "ok",          // exit 0。base は HEAD の祖先
+  "base_oid": "9f1c…",     // 解決後のフルOID（manifest にそのまま転記する）
+  "head_oid": "1a2b…"
+}
+{"status": "base_ahead", "message": "...", "hint": "..."}  // exit 1。撮影に進んではいけない
+{"status": "error", "error": "...", "details": [...]}      // exit 1。OID解決不能・git異常終了
+```
+
+`base_ahead` と `error` を**分けているのが要点**。`git merge-base --is-ancestor` は「祖先でない」も
+「オブジェクトが無い」も非0で返す（1 と 128）。シェルの `|| echo NG` で受けると両者が同じ結論に潰れ、
+fetch 漏れを「base が先行しています」と誤報告する。
+
+MERGED PR には適用しない。マージコミットの親から Before を取る経路は比較の基準が既に固定されており、
+「base が動きうる」という前提が成り立たない。

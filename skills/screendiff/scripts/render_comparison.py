@@ -154,6 +154,20 @@ def render_screen_card(screen: dict) -> str:
 </div>'''
 
 
+def render_commit_chip(manifest: dict) -> str:
+    """実際に撮った2コミットのOIDを比較HTML自体に載せる（任意・監査用）。
+
+    manifest.json はローカルにしか残らないため、比較HTMLだけを受け取った第三者が
+    「どのコミット同士を比べたのか」を確認できるようにする。未記録なら何も出さない。
+    """
+    base_oid = manifest.get("base_oid") or ""
+    head_oid = manifest.get("head_oid") or ""
+    if not (isinstance(base_oid, str) and isinstance(head_oid, str)) or not (base_oid and head_oid):
+        return ""
+    short = f"{html.escape(base_oid[:12])} → {html.escape(head_oid[:12])}"
+    return f'<div class="meta-chip"><span class="k">比較コミット</span><span class="v">{short}</span></div>'
+
+
 def render(manifest: dict, template_text: str) -> str:
     screens = manifest["screens"]
     screen_cards = "\n".join(render_screen_card(s) for s in screens)
@@ -180,6 +194,7 @@ def render(manifest: dict, template_text: str) -> str:
         "{{VALIDATION_STATUS_CLASS}}": validation_class if validation_status else "",
         "{{SCREEN_COUNT}}": str(len(screens)),
         "{{GENERATED_AT}}": manifest.get("generated_at", ""),
+        "{{COMMIT_CHIP}}": render_commit_chip(manifest),
         "{{TOC_LINKS}}": toc_links,
         "{{SCREEN_CARDS}}": screen_cards,
     }
@@ -217,6 +232,9 @@ EXAMPLE_MANIFEST = {
     "pr_url": "https://github.com/example/app/pull/42",
     "base_ref": "main",
     "head_ref": "feature/home-carousel",
+    # 実際に撮った2コミット（任意）。preflight_base.py の出力をそのまま転記する
+    "base_oid": "9f1c2b4e5a6d7c8b9a0f1e2d3c4b5a6978890123",
+    "head_oid": "1a2b3c4d5e6f7890abcdef1234567890abcdef12",
     "build_status": "SUCCEEDED",
     "validation_status": "PASSED (ERROR 0)",  # 任意。無ければ「—」表示
     "generated_at": "2026-07-24T16:00:00+09:00",

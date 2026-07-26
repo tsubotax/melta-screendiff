@@ -149,9 +149,13 @@ web backend では `route_map` の各エントリに **`path`（"/" 始まり）
 /screendiff:screendiff 42        # PR #42 をレビュー（plugin名:スキル名の名前空間付き）
 ```
 
-処理フロー: 適用範囲判定 → Before/After 各々 checkout・ビルド・撮影 → 比較HTML生成 → Cleanup（作業ツリー復帰）→ 共有（Artifact提示 → PRコメント下書き、承認後のみ投稿）。PR作者が自分のPRに比較Artifactを添付する **authorモード** もある（SKILL.md参照）。
+処理フロー: 適用範囲判定 → base先行チェック → Before/After 各々 checkout・ビルド・撮影 → 比較HTML生成 → Cleanup（作業ツリー復帰）→ 共有（Artifact提示 → PRコメント下書き、承認後のみ投稿）。PR作者が自分のPRに比較Artifactを添付する **authorモード** もある（SKILL.md参照）。
 
 **Cleanup は共有より先に走る。** 作業ツリーの復帰に失敗した状態でPRへ書き込むと、取り消せない外向きの操作だけが進んで手元の破損が放置されるため。
+
+### base が進んでいると撮影前に止まる
+
+OPEN PR の Before は「撮影時点の base ブランチ先端」から撮る。base が PR の分岐後に進んでいると、Before に他PRのマージ結果が入り、**PRが加えていない差分が比較に混ざる**。撮影前に `git merge-base --is-ancestor` で検査し、成立しなければ「PRブランチに base を取り込んでから再実行」を案内して中断する（撮ってから補正はできないため）。実際に撮った2コミットのOIDは manifest.json と比較HTMLのヘッダに残る。
 
 ## 設計の背景
 

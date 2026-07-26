@@ -11,6 +11,8 @@ TESTS=(
   test_resolve_screens.py
   test_validate_resolved.py
   test_run_cleanup.py
+  test_preflight_base.py
+  test_render_comparison.py
   backends/web/test_capture.py
   backends/ios/test_ax_dup_check.py
 )
