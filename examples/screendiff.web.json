@@ -2,6 +2,7 @@
   "backend": "web",
   "target_file_patterns": ["^src/(pages|components|features)/.*\\.(tsx|jsx|vue|svelte|astro|css)$"],
   "output_dir": "output/screendiff",
+  "cleanup_command": "npm run clean --if-present",
   "web": {
     "setup_command": "npm ci",
     "serve_command": "npm run dev",

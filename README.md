@@ -107,6 +107,20 @@ Vite は `appType` の既定値が `"spa"` で、**MPA としてビルドして�
 
 **PRが依存パッケージのソースを変更しうるなら（`target_file_patterns` に含めているなら）、その依存のビルドを毎回強制する。** 存在チェックによるスキップに任せない。
 
+### ⚠️ ビルド成果物が作業ツリーに残る（`cleanup_command`）
+
+Before/After を撮り終えて元のブランチに戻っても、**gitignore されたビルド成果物は消えない**。最後に撮った Before 側の成果物が残り、「成果物が無ければビルドする」型のセットアップスクリプトを持つリポジトリでは、次の通常作業がその古い成果物を掴む。
+
+任意の `cleanup_command` を設定すると、元refへの復帰と `git stash pop` が**成功した後にのみ**リポジトリルートで1回実行される:
+
+```json
+"cleanup_command": "npm run clean --if-present"
+```
+
+失敗したら握り潰さず、比較結果の共有フェーズへ進む前に `git status` / `git stash list` を提示して止まる。
+
+**広域削除を書かないこと。** `git clean -fdx` のようなコマンドは、直前の `git stash pop` で復元した untracked ファイルや、比較HTMLを置いた `output_dir` まで消す。消す対象はパスで限定する。
+
 ### route_map の必須項目
 
 web backend では `route_map` の各エントリに **`path`（"/" 始まり）が必須**。省略すると撮影URLが `serve_url` そのもの（＝トップページ）になり、「変更された画面」としてトップを撮ったまま気づけないため、設定読み込み時にエラーで落とす。認証が必要な画面はログイン画面にリダイレクトされた時点で中断する（現状、認証状態を持ち込む仕組みは未対応）。
@@ -119,7 +133,9 @@ web backend では `route_map` の各エントリに **`path`（"/" 始まり）
 /screendiff:screendiff 42        # PR #42 をレビュー（plugin名:スキル名の名前空間付き）
 ```
 
-処理フロー: 適用範囲判定 → Before/After 各々 checkout・ビルド・撮影 → 比較HTML生成（Artifact提示）→ PRコメント下書き（承認後のみ投稿）。PR作者が自分のPRに比較Artifactを添付する **authorモード** もある（SKILL.md参照）。
+処理フロー: 適用範囲判定 → Before/After 各々 checkout・ビルド・撮影 → 比較HTML生成 → Cleanup（作業ツリー復帰）→ 共有（Artifact提示 → PRコメント下書き、承認後のみ投稿）。PR作者が自分のPRに比較Artifactを添付する **authorモード** もある（SKILL.md参照）。
+
+**Cleanup は共有より先に走る。** 作業ツリーの復帰に失敗した状態でPRへ書き込むと、取り消せない外向きの操作だけが進んで手元の破損が放置されるため。
 
 ## 設計の背景
 

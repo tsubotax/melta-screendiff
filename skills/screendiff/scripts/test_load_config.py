@@ -100,6 +100,40 @@ class TestSilentAccidentGuards(unittest.TestCase):
         self.assertEqual(res['json']['web']['serve_url'], 'http://localhost:5173')
 
 
+class TestOptionalCommands(unittest.TestCase):
+    """後から足した任意キーが、既存設定を壊さず・黙って無効化されないか"""
+
+    def test_defaults_are_backward_compatible(self):
+        """既存の設定ファイル（新キー無し）がそのまま通り、既定値が入る"""
+        code, res = _run_config(WEB_OK)
+        self.assertEqual(code, 0)
+        self.assertIsNone(res['json']['cleanup_command'])
+
+    def test_cleanup_command_string_is_accepted(self):
+        code, res = _run_config(_with(WEB_OK, cleanup_command='npm run clean --if-present'))
+        self.assertEqual(code, 0)
+        self.assertEqual(res['json']['cleanup_command'], 'npm run clean --if-present')
+
+    def test_empty_cleanup_command_is_rejected(self):
+        """空文字は「設定したつもりで何も走らない」状態を黙って作る"""
+        code, res = _run_config(_with(WEB_OK, cleanup_command='   '))
+        self.assertEqual(code, 1)
+        self.assertIn('cleanup_command', json.dumps(res['json'], ensure_ascii=False))
+
+    def test_non_string_cleanup_command_is_rejected(self):
+        code, res = _run_config(_with(WEB_OK, cleanup_command=['npm', 'run', 'clean']))
+        self.assertEqual(code, 1)
+        self.assertNotIn('Traceback', res['stderr'])
+        self.assertIn('cleanup_command は文字列です', json.dumps(res['json'], ensure_ascii=False))
+
+    def test_non_string_lint_command_is_rejected(self):
+        """lint_command も同じ経路（シェルに埋め込まれる）なので同じ扱い"""
+        code, res = _run_config(_with(WEB_OK, lint_command=1))
+        self.assertEqual(code, 1)
+        self.assertNotIn('Traceback', res['stderr'])
+        self.assertIn('lint_command は文字列です', json.dumps(res['json'], ensure_ascii=False))
+
+
 class TestNoTracebackOnMalformedConfig(unittest.TestCase):
     """型不正でも整形されたエラーを返し、traceback を出さないか"""
 

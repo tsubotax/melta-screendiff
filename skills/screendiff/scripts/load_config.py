@@ -33,6 +33,12 @@ DEFAULTS = {
     "output_dir": "output/screendiff",
     # 任意: PRの変更ファイル群を引数に取る lint コマンド（変更ファイル限定で実行される）
     "lint_command": None,
+    # 任意: Cleanup で元refへの復帰 + stash pop が成功した「後に」repo-root で1回実行する
+    # 後片付けコマンド。gitignore されたビルド成果物は checkout では消えないため、最後に
+    # Before 側でビルドした成果物が残置し、次の通常作業が stale な成果物を掴む
+    # （例: "npm run clean --if-present"）。パスを限定しない広域削除は書かないこと
+    # （stash pop で戻した untracked ファイルまで巻き込む）
+    "cleanup_command": None,
     "web": {
         # 任意: 各サイドの checkout 直後に1回実行（依存インストール等）
         "setup_command": None,
@@ -135,6 +141,16 @@ def validate(config: dict) -> list[str]:
         else:
             errors.append(f"{name} はオブジェクトです: {type(value).__name__}")
             sections[name] = {}
+    # SKILL.md 側でシェルコマンドとして実行されるため、非文字列・空文字を通さない。
+    # 空文字を許すと「設定したつもりで何も走らない」状態が黙って成立する
+    for key in ("lint_command", "cleanup_command"):
+        value = config.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            errors.append(f"{key} は文字列です: {type(value).__name__}")
+        elif not value.strip():
+            errors.append(f"{key} が空文字です（実行しないなら null にしてください）")
     patterns = config.get("target_file_patterns")
     if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
         errors.append("target_file_patterns は文字列の配列です")

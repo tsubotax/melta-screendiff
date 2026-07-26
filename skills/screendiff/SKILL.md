@@ -17,13 +17,11 @@ SCRIPTS="${CLAUDE_PLUGIN_ROOT}/skills/screendiff/scripts"
 PR=<引数のPR番号>   # 例: /screendiff:screendiff 42 → PR=42
 ```
 
-## authorモード（PR作者が自分のPRに比較Artifactを添付する場合）
+## authorモード（PR作者が自分のPRに比較材料を添付する場合）
 
-PR作成直後に作者自身がレビュー材料を添付する用途。Phase 0〜5 は通常どおり実行し、**Phase 6（レビューコメント下書き）はスキップ**する。代わりに:
+PR作成直後に作者自身がレビュー材料を添付する用途。Phase 0〜6 は通常どおり実行し、**Phase 7 のレビューコメント下書きはスキップ**する。代わりに Phase 7 の authorモード手順に進む。
 
-1. Phase 5 の比較Artifactを発行したら、**Artifact 共有トグルを ON** にするようユーザーに促す（共有OFFのままではレビュアーが開けない。トグルはAI側から操作できないため人間の1クリックが必須）
-2. 共有ONの確認後、Artifact URL を `gh pr edit "$PR" --body-file ...` でPR本文の「概要」直下に追記する（例: `【Before/After比較（実キャプチャ）】{URL}`）
-3. 新規画面でBefore側に対象画面が存在しない場合は、Afterキャプチャのみの片側Artifactでよい（比較HTMLに「新規画面のためAfterのみ」と明記される）
+新規画面でBefore側に対象画面が存在しない場合は、Afterキャプチャのみの片側比較でよい（比較HTMLに「新規画面のためAfterのみ」と明記される）。
 
 ## 前提1: PR番号は全コマンドに明示的に渡す
 
@@ -83,7 +81,7 @@ git stash push -u -m "screendiff-$PR-autostash"
 
 - `<config.ios.generated_project_file>` が設定されている場合、その事前dirty状態も控える（`git diff --quiet -- <path>; echo "gen_pre_dirty=$?"`）。Phase 3/4で自動破棄してよいかの判定に使う。
 
-stashしたかどうか（`STASHED=true/false`）を必ず控えておく。**Cleanup（本ファイル末尾）で必ず`git stash pop`する。**
+stashしたかどうか（`STASHED=true/false`）を必ず控えておく。**Cleanup（Phase 6）で必ず`git stash pop`する。**
 
 ## Phase 2: PRメタデータ取得・画面解決
 
@@ -208,7 +206,7 @@ STOP_FAILED または STILL_ALIVE の場合は**先へ進まず**状態をユー
 git diff -- <config.ios.generated_project_file> | python3 "$SCRIPTS/backends/ios/generated_project_diff_guard.py"
 ```
 
-`verdict` が `SAFE` かつ Phase 1で事前clean（`gen_pre_dirty=0`）だった場合のみ `git checkout -- <path>` で破棄する。事前dirty、または `ATTENTION` の場合は**絶対に自動破棄しない**（生成ツールのバージョン差ノイズとユーザーの意図的変更を区別できないため）。提示のみに留め、Phase 6のコメント下書き候補にメモする。
+`verdict` が `SAFE` かつ Phase 1で事前clean（`gen_pre_dirty=0`）だった場合のみ `git checkout -- <path>` で破棄する。事前dirty、または `ATTENTION` の場合は**絶対に自動破棄しない**（生成ツールのバージョン差ノイズとユーザーの意図的変更を区別できないため）。提示のみに留め、Phase 7のコメント下書き候補にメモする。
 
 各screen idについて、**stale binary対策として必ず `uninstall → install` を明示的に挟んでから**撮影する（「アプリが入っているか」しか見ない条件付きインストールは、ブランチ切替後に前のバイナリのまま撮影する事故を起こす）:
 
@@ -251,7 +249,7 @@ cat "$AX_OUT" 2>/dev/null
 ```
 
 - `openurl` の失敗も `&&` 連鎖で `AX_CHECK_FAILED` に落とす（前の画面を検査して `passed` 扱いになる事故を防ぐ）。deep linkで開き直してから実行する（paged_capture後はスクロール末尾の状態のため）。
-- 画面ごとに `ax_check_status` を必ず4値のどれかで記録する: `skipped` / `failed` / `duplicates` / `passed`。**failed/skippedをpassed扱いで省略しない**。manifestの該当画面 `description` 末尾に含め、Phase 6の備考にも転記する。
+- 画面ごとに `ax_check_status` を必ず4値のどれかで記録する: `skipped` / `failed` / `duplicates` / `passed`。**failed/skippedをpassed扱いで省略しない**。manifestの該当画面 `description` 末尾に含め、Phase 7の備考にも転記する。
 - 既存画面（kind: changed）はBefore側でも同じチェックを実行し（`ax-dup-before-<screen_id>.json`）、Beforeにも同じ重複がある場合は「既存の重複（PR起因ではない）」と明記する。
 
 ### lint（backend共通・任意）
@@ -262,7 +260,7 @@ cat "$AX_OUT" 2>/dev/null
 gh pr diff "$PR" --name-only | <target_file_patternsでフィルタ> | xargs <config.lint_command> || true
 ```
 
-検出があればPhase 6のコメント下書きに件数と代表例を記載する。
+検出があればPhase 7のコメント下書きに件数と代表例を記載する。
 
 ## Phase 4: Before取得
 
@@ -284,7 +282,7 @@ CHECKOUT_OKなら、Phase 3と同じbackend手順を `--prefix before` で実行
 - webは**serverを必ず立て直す**（Phase 3で止めた状態から。事前のPORT_BUSYチェックも再度行う）。撮影後また止める。
 - iosのgenerated_project_fileガードもPhase 3と全く同様に実行する（破棄せず持ち越すとCleanupでの復帰後にdirtyとして残る）。
 
-## Phase 5: 比較HTML生成 + Artifact提示
+## Phase 5: 比較HTML生成
 
 各画面のbefore/after PNG（**全ページ**。スクロール下部の変更を見落とさない）をReadツールで実際に確認し、1〜2行の変更点コメントを`description`として書く（プレーンテキスト。render側でHTMLエスケープされる）。
 
@@ -296,9 +294,60 @@ python3 "$SCRIPTS/render_comparison.py" \
   --output "$OUT_DIR/comparison.html"
 ```
 
-生成された `comparison.html` を Artifact として提示する（Artifact機能が無い環境ではローカルでブラウザ表示）。画像は生成時にbase64埋め込み済みなので追加変換は不要。
+画像は生成時にbase64埋め込み済みなので追加変換は不要。**生成した時点ではまだ配布しない** — 先に Phase 6（Cleanup）を実行する。作業ツリーが壊れたままPRへ書き込むと、外向きの取り消せない操作だけが進んで手元の破損が放置される。
 
-## Phase 6: PRコメント下書き → HITL → 投稿
+## Phase 6: Cleanup（作業ツリー復帰）— どこで打ち切っても必ず実行する
+
+Phase 1〜5のどのタイミングで処理を打ち切っても（対象UIファイル変更を含まないPRでの早期終了を除く — その場合はまだ何も動かしていない）、**共有（Phase 7）とユーザーへの最終報告の前に**必ず次を実行する:
+
+```bash
+# webでserverが生きていれば止める（pid-fileが無ければno-op）
+python3 "$SCRIPTS/backends/web/serve_ctl.py" stop --pid-file "$OUT_DIR/serve.pid" || true
+cd "$REPO_ROOT"
+git checkout "$ORIGINAL_REF" && echo "RETURN_OK" || echo "RETURN_FAILED — 状態を確認して手動対応が必要"
+git branch --show-current   # ORIGINAL_REFと一致するか確認
+```
+
+Phase 1で`STASHED=true`だった場合、続けて:
+
+```bash
+git stash pop && echo "STASH_POP_OK" || echo "STASH_POP_FAILED"
+```
+
+### 後片付けコマンド（`cleanup_command`）
+
+**RETURN_OK かつ（stashしていれば）STASH_POP_OK のときにのみ**実行する。gitignoreされたビルド成果物は`git checkout`では消えないため、最後にBefore側でビルドした成果物が作業ツリーに残る。「成果物が無ければビルドする」型のセットアップスクリプトを持つリポジトリでは、次の通常作業がその stale な成果物を掴む:
+
+```bash
+python3 "$SCRIPTS/run_cleanup.py" --config-json "$CONFIG_JSON" --repo-root "$REPO_ROOT" \
+  && echo "CLEANUP_OK" || echo "CLEANUP_FAILED"
+```
+
+- 未設定なら `status: skipped` で正常終了する（設定していないリポジトリでは何も起きない）。設定値の有無の判定はスクリプト側が行うので、シェルに値を埋め込んで `if` を書かない
+- **復帰・stash popが失敗している状態では実行しない。** 壊れた作業ツリーに後片付けを重ねると被害が広がる（stash popで戻ったばかりのファイルを消しうる）
+
+### 失敗契約
+
+`RETURN_FAILED` / `STASH_POP_FAILED`（コンフリクト含む）/ `CLEANUP_FAILED` のいずれかが出たら、**黙って進まず Phase 7 へ進まない**。現在のgit状態をそのまま提示してユーザーの判断を仰ぐ:
+
+```bash
+git status
+git stash list
+```
+
+比較HTMLは生成済みなのでそのパスは伝えてよいが、**Artifact発行・PR本文編集・`gh pr comment` 投稿は行わない**（手元が壊れている状態で外向きの操作だけ先に進めない）。
+
+## Phase 7: 共有（Artifact提示 → PRコメント下書き → HITL → 投稿）
+
+Phase 6 が全て成功した場合のみ進む。生成された `comparison.html` を Artifact として提示する（Artifact機能が無い環境ではローカルでブラウザ表示）。続けてモード別に:
+
+#### authorモード（PR作者が自分のPRに添付する場合）
+
+1. **Artifact 共有トグルを ON** にするようユーザーに促す（共有OFFのままではレビュアーが開けない。トグルはAI側から操作できないため人間の1クリックが必須）
+2. 共有ONの確認後、Artifact URL を `gh pr edit "$PR" --body-file ...` でPR本文の「概要」直下に追記する（例: `【Before/After比較（実キャプチャ）】{URL}`）
+3. 下記のレビューコメント下書き・投稿はスキップして終了する
+
+#### レビュアーモード（既定）: PRコメント下書き → HITL → 投稿
 
 マージ済みPRの場合、コメント投稿の要否をユーザーに確認する（マージ後のコメントは実務的意味が薄いことが多い）。
 
@@ -336,26 +385,6 @@ gh pr comment "$PR" --body-file "$OUT_DIR/comment-draft.md"
 
 **このHITLゲートは省略不可。**
 
-## Cleanup（正常終了・早期終了・エラー中断のいずれでも必ず実行する）
-
-Phase 1〜6のどのタイミングで処理を打ち切っても（対象外PRでの早期終了を除く — その場合はまだ何も動かしていない）、ユーザーへの最終報告を出す**前**に必ず次を実行する:
-
-```bash
-# webでserverが生きていれば止める（pid-fileが無ければno-op）
-python3 "$SCRIPTS/backends/web/serve_ctl.py" stop --pid-file "$OUT_DIR/serve.pid" || true
-cd "$REPO_ROOT"
-git checkout "$ORIGINAL_REF" && echo "RETURN_OK" || echo "RETURN_FAILED — 状態を確認して手動対応が必要"
-git branch --show-current   # ORIGINAL_REFと一致するか確認
-```
-
-Phase 1で`STASHED=true`だった場合、続けて:
-
-```bash
-git stash pop
-```
-
-RETURN_FAILEDの場合、および`stash pop`がコンフリクトした場合は、**黙って進まず**現在のgit状態（`git status`, `git stash list`）をそのまま提示してユーザーに判断を仰ぐ。
-
 ## エッジケース
 
 | ケース | 扱い |
@@ -376,4 +405,4 @@ RETURN_FAILEDの場合、および`stash pop`がコンフリクトした場合�
 | マージ済み・親2つのmerge commit | headRefOidではなくmergeCommit.oidをAfter、`^1`をBefore |
 | マージ済み・親1つ（squash/rebase） | Before自動特定を諦め、ユーザーにbase側コミットを確認 |
 | `git checkout`/`git fetch`失敗 | 後続を実行せず即中断・Cleanupへ進み状態を報告 |
-| Cleanupでの復帰・stash pop失敗 | 黙って進まず`git status`/`git stash list`を提示し判断を仰ぐ |
+| Cleanupでの復帰・stash pop・cleanup_command失敗 | 黙って進まず`git status`/`git stash list`を提示し判断を仰ぐ。**Phase 7の共有には進まない** |

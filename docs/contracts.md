@@ -7,7 +7,9 @@ SKILL.md（オーケストレーション層 / AIが読む手順書）
   └── scripts/（決定論的処理層 / Python標準ライブラリのみ）
         ├── load_config.py       設定解決（2段フォールバック）
         ├── resolve_screens.py   変更ファイル → 画面解決（route_map）
+        ├── validate_resolved.py resolver出力の契約検証（撮影前ゲート）
         ├── render_comparison.py manifest.json → base64埋め込み比較HTML
+        ├── run_cleanup.py       cleanup_command の実行（Cleanupフェーズ）
         └── backends/
             ├── web/capture.py   Playwright/Chrome フルページ撮影
             └── ios/…            simctl + sim-use ページング撮影・AXチェック
@@ -28,6 +30,7 @@ SKILL.md（オーケストレーション層 / AIが読む手順書）
   "target_file_patterns": ["^src/(pages|components)/"],  // Phase 1 の適用範囲判定（re.search）
   "output_dir": "output/screendiff",   // repo-root相対 or 絶対パス
   "lint_command": null,                // 任意。変更ファイル群を引数に取るlint
+  "cleanup_command": null,             // 任意。Cleanup成功後にrepo-rootで1回（下記§1.1）
   "web": {
     "setup_command": null,             // 任意。checkout直後に1回（npm ci 等）
     "serve_command": "npm run dev",    // バックグラウンド起動される
@@ -65,6 +68,32 @@ load_config.py は後段の silent 事故を防ぐため、**確定前に**以�
 - `web` / `ios` / `screens` がオブジェクトであること、`file_pattern` / `id` / `resolver_command` /
   `serve_command` / `ios.*` が文字列であること（**どんな入力でも traceback を出さない**のがこの
   関数の契約。設定を書き間違えただけの利用者に「プラグインが壊れている」と誤認させない）
+- `lint_command` / `cleanup_command` が文字列または `null` であること（空文字は不可。
+  「設定したつもりで何も走らない」状態が黙って成立するため）
+
+### 1.1 cleanup_command
+
+Cleanup で **元refへの復帰と `git stash pop` が成功した後にのみ**、repo-root を cwd として1回実行する
+（実行は `run_cleanup.py`。順序の担保はSKILL.md側の責務）。gitignore されたビルド成果物は
+`git checkout` では消えないため、最後に Before 側でビルドした成果物が作業ツリーに残る。
+「成果物が無ければビルドする」型のセットアップスクリプトを持つリポジトリでは、次の通常作業が
+その stale な成果物を掴む。
+
+`run_cleanup.py` の出力（stdout, JSON）と終了コード:
+
+```jsonc
+{"status": "skipped"}                        // 未設定。exit 0（設定していないリポジトリでは何も起きない）
+{"status": "succeeded", "exit_code": 0, ...} // exit 0
+{"status": "failed", "exit_code": 3, ...}    // exit 1。stdout_tail / stderr_tail に末尾2000字
+{"status": "error", "error": "..."}          // exit 1。config不正・repo-root不在など実行前の失敗
+```
+
+**失敗を握り潰さない**のがここでも核。非0終了は exit 1 で返し、SKILL.md は共有フェーズへ進まずに
+`git status` / `git stash list` を提示する（残置に気づかないまま「完了しました」と報告しない）。
+
+⚠️ **広域削除を書かないこと。** `git clean -fdx` のようなコマンドは、直前の `git stash pop` で
+復元した untracked ファイルや、比較HTMLを置いた `output_dir` まで消す。削除するならパスを
+限定する（`npm run clean --if-present` のようなリポジトリ側のスクリプトを呼ぶのが安全）。
 
 ⚠️ **検証で防げないもの**: `serve_command` にSPAフォールバックを持つサーバー（Vite の
 dev / preview は `appType` 既定 `"spa"`、Next.js 等も同様）を指定すると、存在しないパスでも

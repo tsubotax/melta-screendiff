@@ -10,6 +10,7 @@ TESTS=(
   test_load_config.py
   test_resolve_screens.py
   test_validate_resolved.py
+  test_run_cleanup.py
   backends/web/test_capture.py
   backends/ios/test_ax_dup_check.py
 )
