@@ -174,6 +174,10 @@ OPEN PR の Before をどこから撮るかで、比較に映るものが変わ�
 
 `merge_base` は成功偽装ではない — PR固有の差分としては正しい比較になる。ただし「今の base に載せたらどう見えるか」は分からないので、比較HTMLのヘッダに `Before基準: merge-base（PRの分岐点）` を出して黙って基準を変えないようにしてある。実際に撮った2コミットのOIDも manifest.json と比較HTMLに残る。
 
+### 出力は実行ごとに分かれる
+
+`output_dir/<PR番号>/<実行時刻>/` に出力し、`output_dir/<PR番号>/latest` が最新実行を指す。同一PRの撮り直し（レビュー指摘 → 修正 push → 再撮影）で前イテレーションの証跡が消えず、中断した回に前回の比較HTMLを掴むこともない。過去の実行ディレクトリは自動削除しない。
+
 ## 設計の背景
 
 このスキルの手順の多くは実運用で起きた事故への対策としてルール化されている（stale binary/stale server対策、マージ済みPRのcheckout戦略、撮影失敗の成功偽装禁止、Cleanupの必須実行など）。詳細は [SKILL.md](skills/screendiff/SKILL.md) と [docs/contracts.md](docs/contracts.md) を参照。**冗長に見えても削らないこと。**

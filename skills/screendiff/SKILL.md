@@ -75,7 +75,17 @@ python3 "$SCRIPTS/load_config.py" --repo-root "$REPO_ROOT" > "$CONFIG_JSON" \
 cat "$CONFIG_JSON"
 ```
 
-CONFIG_NGなら、出力の `error` / `searched` / `details` / `hint` を提示して終了する（対象リポジトリにコミットできない場合はユーザー側 `~/.config/melta-screendiff/<repo名>.json` を案内。`${CLAUDE_PLUGIN_ROOT}/examples/` にサンプルあり）。以降、config値は `<config.xxx>` と表記する。`OUT_DIR="$REPO_ROOT/<config.output_dir>/$PR"`（output_dirが絶対パスならそのまま）。
+CONFIG_NGなら、出力の `error` / `searched` / `details` / `hint` を提示して終了する（対象リポジトリにコミットできない場合はユーザー側 `~/.config/melta-screendiff/<repo名>.json` を案内。`${CLAUDE_PLUGIN_ROOT}/examples/` にサンプルあり）。以降、config値は `<config.xxx>` と表記する。
+
+続けて**この実行専用の出力ディレクトリ**を作る。出力先を `output_dir/<PR>` に固定すると、同一PRの撮り直し（レビュー指摘 → 修正 push → 再撮影。**例外ではなく通常運用**）が同じ場所を使い、前イテレーションの証跡が消える／中断した回に前回の `comparison.html` が残る:
+
+```bash
+RUN_DIR_JSON=$(python3 "$SCRIPTS/run_dir.py" --config-json "$CONFIG_JSON" \
+  --repo-root "$REPO_ROOT" --pr "$PR") && echo "$RUN_DIR_JSON"
+OUT_DIR=<出力の out_dir>   # 絶対パス。以降の出力は全てこの下に置く
+```
+
+`latest`（`output_dir/<PR>/latest`）が最新実行を指すので、共有・添付時の安定参照に使える。**過去の実行ディレクトリは消さない。**
 
 ## Phase 1: 適用範囲判定 + 事前安全性チェック + 退避
 
@@ -482,6 +492,7 @@ gh pr comment "$PR" --body-file "$OUT_DIR/comment-draft.md"
 | OPEN PRでbaseが分岐後に進んでいる（`branch_tip`） | Phase 2のpreflightで**撮影前に**中断。baseの取り込みか`merge_base`モードを案内 |
 | 同上（`merge_base`） | 中断せずPRの分岐点からBeforeを撮る。warningをユーザー報告と比較HTMLの両方に明示 |
 | baseとHEADに共通祖先が無い | どちらのモードでも比較の基準を作れない。中断（0件成功に倒さない） |
+| 同じPRの撮り直し | Phase 0で実行ごとの出力ディレクトリを作る。過去の実行は消さない |
 | preflightがOIDを解決できない | fetch漏れ/OID不正。「base先行」とは別物として原因を提示し中断 |
 | 設定ファイルが無い | Phase 0で終了、セットアップ手順を案内 |
 | Afterビルド/起動失敗 | 中断、エラー内容を報告してCleanupへ |

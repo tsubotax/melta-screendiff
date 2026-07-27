@@ -6,6 +6,7 @@
 SKILL.md（オーケストレーション層 / AIが読む手順書）
   └── scripts/（決定論的処理層 / Python標準ライブラリのみ）
         ├── load_config.py       設定解決（2段フォールバック）
+        ├── run_dir.py           実行ごとの出力ディレクトリ作成
         ├── resolve_screens.py   変更ファイル → 画面解決（route_map）
         ├── validate_resolved.py resolver出力の契約検証（撮影前ゲート）
         ├── preflight_base.py    base先行チェック（撮影前ゲート・OPEN PRのみ）
@@ -158,6 +159,20 @@ MERGED PR には効かない（マージコミットの親が Before で、基�
 base が日常的に進むリポジトリ（他チームの日次リリースやリリース自動コミットがある等）では
 `branch_tip` の中断ゲートがほぼ毎回発火して運用が回らないため、`merge_base` を選ぶ。
 実行時に `--before-base merge_base` で上書きできる。
+
+### 1.4 出力ディレクトリ（run_dir.py）
+
+`output_dir/<PR>/<実行時刻>/` を実行ごとに作り、`output_dir/<PR>/latest` を最新実行へ向ける。
+
+同一PRの撮り直し（レビュー指摘 → 修正 push → 再撮影）は例外ではなく通常運用で、
+出力先を `output_dir/<PR>` に固定すると2つの問題が同時に起きる:
+
+1. **前イテレーションの証跡が消える** — 修正前後の比較HTMLを並べられない
+2. **撮影前に中断した回に、前回の comparison.html が「今回の比較」として残る**
+   （SKILL.md 側の `COMPARISON_READY` と合わせた多層防御。片方だけに頼らない）
+
+既存ファイルは一切消さない。`latest` が symlink 以外（利用者が作ったディレクトリ等）なら
+触らず `latest: null` を返す。
 
 ⚠️ **検証で防げないもの**: `serve_command` にSPAフォールバックを持つサーバー（Vite の
 dev / preview は `appType` 既定 `"spa"`、Next.js 等も同様）を指定すると、存在しないパスでも

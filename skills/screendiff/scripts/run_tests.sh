@@ -11,6 +11,7 @@ TESTS=(
   test_resolve_screens.py
   test_validate_resolved.py
   test_run_cleanup.py
+  test_run_dir.py
   test_share_plan.py
   test_preflight_base.py
   test_render_comparison.py
