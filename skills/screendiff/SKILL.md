@@ -140,23 +140,31 @@ CHECKOUT_FAILEDの場合はCleanupへ進み終了する。HEAD_MISMATCHの場合
 
 ### base先行チェック（OPEN PRのみ・撮影前に必ず）
 
-OPEN PR の Before は「撮影時点の base ブランチ先端」から撮る。base が PR の分岐後に進んでいると、**Beforeに他PRのマージ結果が入り、PRが加えていない差分が比較に混ざる**。撮影後にOIDを記録しても比較の正しさは戻らないので、撮影前に確定させる:
+OPEN PR の Before をどのコミットから撮るかを、**撮影前に**確定させる。既定（`branch_tip`）では base ブランチ先端から撮るため、base が PR の分岐後に進んでいると**Beforeに他PRのマージ結果が入り、PRが加えていない差分が比較に混ざる**。撮影後にOIDを記録しても撮ったもの自体は直せない:
 
 ```bash
 git fetch origin "<baseRefName>" && BASE_OID=$(git rev-parse FETCH_HEAD) && echo "BASE_OID=$BASE_OID"
 python3 "$SCRIPTS/preflight_base.py" --repo-root "$REPO_ROOT" \
-  --base-oid "$BASE_OID" --head-oid "$HEAD_OID" \
+  --base-oid "$BASE_OID" --head-oid "$HEAD_OID" --mode "<config.before_base>" \
   --base-ref "<baseRefName>" --head-ref "<headRefName>" \
   && echo "PREFLIGHT_OK" || echo "PREFLIGHT_NG"
 ```
 
-- `PREFLIGHT_NG`（`status: base_ahead`）なら**撮影に進まず中断**し、出力の `message` / `hint` をそのまま提示してCleanupへ進む。「とりあえず撮って差分を見る」で継続しない（混入した差分をPRの変更としてレビューさせることになる）
-- `PREFLIGHT_NG`（`status: error`）は fetch漏れ・OID不正であって「base先行」ではない。原因を提示して中断する（両者を同じ結論に潰さない）
-- `PREFLIGHT_OK` なら `BASE_OID` / `HEAD_OID` を控える。**Phase 4 の Before checkout はこの `BASE_OID` を使い**、Phase 5 で manifest に記録する（後から「どのコミット同士を比べたか」を監査できるようにする）
+**Before をどこから撮るかは `<config.before_base>` が決める**（既定 `branch_tip`。実行時に `--before-base merge_base` の明示指定があればそちらを優先し、その値を `--mode` に渡す）:
+
+| モード | Before | base が先行していたら |
+|---|---|---|
+| `branch_tip`（既定） | base ブランチ先端 | **中断**（PRと無関係な差分が混入するため） |
+| `merge_base` | PRの分岐点 | **続行**（比較はPR固有の差分のまま保たれる）。警告を明示する |
+
+- `PREFLIGHT_NG` かつ `status: base_ahead`（`branch_tip` モード）なら**撮影に進まず中断**し、`message` / `hint` をそのまま提示してCleanupへ進む。「とりあえず撮って差分を見る」で継続しない。baseが日常的に進むリポジトリなら `before_base: "merge_base"` を案内する
+- `PREFLIGHT_NG` かつ `status: error` は fetch漏れ・OID不正・共通祖先なしであって「base先行」ではない。原因を提示して中断する（両者を同じ結論に潰さない）
+- `PREFLIGHT_OK` で `warning` が付いている場合（`merge_base` モードで base が先行）は、**その warning をユーザーへの報告に必ず含める**。「今の base に載せたらどう見えるか」は分からない比較であることを黙って伏せない
+- `PREFLIGHT_OK` なら出力の `before_oid` / `base_oid` / `head_oid` / `merge_base_oid` を控える。**Phase 4 の Before checkout は `before_oid`**（撮るべきコミットとして確定済み。自分で組み立て直さない）、Phase 5 で manifest に記録する
 
 MERGED PR ではこのチェックは**実行しない**。マージコミットの親から Before を取る経路は比較の基準が既に固定されており、base が動きうるという前提が成り立たない。代わりに manifest 用のOIDだけ控える:
 
-- `PARENT_COUNT=2`: `HEAD_OID=$MERGE_OID`、`BASE_OID=$(git rev-parse "${MERGE_OID}^1")`
+- `PARENT_COUNT=2`: `HEAD_OID=$MERGE_OID`、`BASE_OID=$(git rev-parse "${MERGE_OID}^1")`、`BEFORE_OID=$BASE_OID`
 - `PARENT_COUNT=1`（squash/rebase merge）: **`^1` を BASE_OID にしない。** 上の分岐で「`^1` はBeforeとして信頼できない」と判断した対象そのもので、記録すると誤った監査記録が残る。ユーザーに確認したbase側コミットのSHAを `BASE_OID` にする（確認が取れていなければ `base_oid` は記録しない）
 
 ### 画面解決
@@ -317,7 +325,7 @@ gh pr diff "$PR" --name-only | <target_file_patternsでフィルタ> | xargs <co
 cd "$REPO_ROOT"
 ```
 
-- **OPENなPR**: `git checkout --detach "$BASE_OID" && echo "CHECKOUT_OK" || echo "CHECKOUT_FAILED"`（Phase 2 の base先行チェックで検証した**そのOID**を使う。ここで再fetchして`FETCH_HEAD`を取り直すと、検証したコミットと撮るコミットがズレて preflight が意味を失う。`git checkout origin/<baseRefName>`もstaleなremote-trackingを踏むため使わない）
+- **OPENなPR**: `git checkout --detach "$BEFORE_OID" && echo "CHECKOUT_OK" || echo "CHECKOUT_FAILED"`（Phase 2 の preflight が返した `before_oid`。ここで再fetchして`FETCH_HEAD`を取り直すと、検証したコミットと撮るコミットがズレて preflight が意味を失う。`git checkout origin/<baseRefName>`もstaleなremote-trackingを踏むため使わない）
 - **MERGED済みPR（PARENT_COUNT=2）**: `git checkout --detach "${MERGE_OID}^1" && echo "CHECKOUT_OK" || echo "CHECKOUT_FAILED"`（fetch不要。マージコミット自体がローカル履歴に含まれている）
 
 CHECKOUT_FAILEDの場合はCleanupへ進み、「Beforeブランチ取得に失敗したためAfterのみの比較になります」と報告する。
@@ -333,7 +341,7 @@ CHECKOUT_OKなら、Phase 3と同じbackend手順を `--prefix before` で実行
 
 各画面のbefore/after PNG（**全ページ**。スクロール下部の変更を見落とさない）をReadツールで実際に確認し、1〜2行の変更点コメントを`description`として書く（プレーンテキスト。render側でHTMLエスケープされる）。
 
-manifest.json（契約は `docs/contracts.md` §4）を`$OUT_DIR`に組み立てる。`*_paths` にはcapture JSONの `files` をページ順のまま渡し、`truncated`/`fallback_single`/`paging_failed` フラグも同JSONから転記する（**失敗を成功偽装しない**。フラグは比較HTMLに警告表示される）。Phase 2 で控えた `BASE_OID` / `HEAD_OID` を `base_oid` / `head_oid` として記録する（実際に撮った2コミットの監査記録。比較HTMLのヘッダにも短縮OIDで出る）:
+manifest.json（契約は `docs/contracts.md` §4）を`$OUT_DIR`に組み立てる。`*_paths` にはcapture JSONの `files` をページ順のまま渡し、`truncated`/`fallback_single`/`paging_failed` フラグも同JSONから転記する（**失敗を成功偽装しない**。フラグは比較HTMLに警告表示される）。Phase 2 で控えたOIDを `before_oid`（実際にBeforeとして撮ったコミット）/ `head_oid` / `base_oid` / `merge_base_oid` として記録し、モードを `before_base` に入れる（監査記録。`before_oid` と `before_base` は比較HTMLのヘッダにも出る）:
 
 ```bash
 python3 "$SCRIPTS/render_comparison.py" \
@@ -412,7 +420,6 @@ python3 "$SCRIPTS/share_plan.py" --config-json "$CONFIG_JSON" \
 1. `comparison.html` の**絶対パス**（`$OUT_DIR/comparison.html`）を提示する。ブラウザで開く手順も添える
 2. Artifactは発行しない。**PRへの書き込み（`gh pr comment` / `gh pr edit`）は一切しない**
 3. 変更画面の要約（Phase 5 で書いた `description`）はチャットに提示してよい。PRやチャットツールへ貼るかどうかはユーザーが手で決める
-
 ここで終了する。下記のPRコメント下書きには進まない。
 
 ### `effective: "artifact_unavailable"`
@@ -472,7 +479,9 @@ gh pr comment "$PR" --body-file "$OUT_DIR/comment-draft.md"
 | ケース | 扱い |
 |---|---|
 | 対象UIファイル変更を含まないPR | Phase 1で早期終了（Cleanup不要、まだ何も動かしていない） |
-| OPEN PRでbaseが分岐後に進んでいる | Phase 2のpreflightで**撮影前に**中断。baseの取り込みを案内（撮って後から補正はできない） |
+| OPEN PRでbaseが分岐後に進んでいる（`branch_tip`） | Phase 2のpreflightで**撮影前に**中断。baseの取り込みか`merge_base`モードを案内 |
+| 同上（`merge_base`） | 中断せずPRの分岐点からBeforeを撮る。warningをユーザー報告と比較HTMLの両方に明示 |
+| baseとHEADに共通祖先が無い | どちらのモードでも比較の基準を作れない。中断（0件成功に倒さない） |
 | preflightがOIDを解決できない | fetch漏れ/OID不正。「base先行」とは別物として原因を提示し中断 |
 | 設定ファイルが無い | Phase 0で終了、セットアップ手順を案内 |
 | Afterビルド/起動失敗 | 中断、エラー内容を報告してCleanupへ |

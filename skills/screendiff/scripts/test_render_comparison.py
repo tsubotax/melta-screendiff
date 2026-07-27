@@ -70,6 +70,32 @@ class TestCommitChip(unittest.TestCase):
         html = _render(dict(BASE_MANIFEST, base_oid=123, head_oid=456))
         self.assertNotIn('比較コミット', html)
 
+    def test_before_oid_wins_over_base_oid(self):
+        """merge_base モードでは撮ったのは base 先端ではない。撮っていない方を出さない"""
+        html = _render(dict(BASE_MANIFEST,
+                            base_oid='aaaaaaaaaaaa1111111111111111111111111111',
+                            before_oid='bbbbbbbbbbbb2222222222222222222222222222',
+                            head_oid='cccccccccccc3333333333333333333333333333',
+                            before_base='merge_base'))
+        self.assertIn('bbbbbbbbbbbb', html)
+        self.assertNotIn('aaaaaaaaaaaa', html)
+
+    def test_merge_base_mode_is_stated_in_html(self):
+        """HTMLだけ受け取った人に「今のbaseに載せた姿ではない」と伝わること"""
+        html = _render(dict(BASE_MANIFEST,
+                            before_oid='bbbbbbbbbbbb2222222222222222222222222222',
+                            head_oid='cccccccccccc3333333333333333333333333333',
+                            before_base='merge_base'))
+        self.assertIn('merge-base', html)
+
+    def test_branch_tip_mode_has_no_extra_chip(self):
+        html = _render(dict(BASE_MANIFEST,
+                            before_oid='bbbbbbbbbbbb2222222222222222222222222222',
+                            head_oid='cccccccccccc3333333333333333333333333333',
+                            before_base='branch_tip'))
+        self.assertIn('比較コミット', html)
+        self.assertNotIn('merge-base', html)
+
 
 class TestNoUnreplacedPlaceholders(unittest.TestCase):
     """置換漏れは `{{FOO}}` の文字列として利用者の画面に出る"""

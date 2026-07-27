@@ -39,6 +39,13 @@ DEFAULTS = {
     # （例: "npm run clean --if-present"）。パスを限定しない広域削除は書かないこと
     # （stash pop で戻した untracked ファイルまで巻き込む）
     "cleanup_command": None,
+    # OPEN PR で Before をどのコミットから撮るか。
+    #   "branch_tip" … base ブランチの先端（既定・従来動作）。「今の base にこのPRを載せると
+    #                  どう見えるか」を見る。base が PR の分岐後に進んでいると撮影前に中断する
+    #   "merge_base" … PR の分岐点（merge-base）。「このPRだけで何が変わったか」を見る。
+    #                  base が日常的に進むリポジトリ向け（中断せず警告して続行する）
+    # MERGED PR には効かない（マージコミットの親が Before で、基準が既に固定されているため）
+    "before_base": "branch_tip",
     # 比較結果の配布方法。
     #   "artifact" … 比較HTMLを Artifact として発行し、PRへの書き込み（本文編集・コメント
     #                投稿）まで進む既定フロー
@@ -151,6 +158,12 @@ def validate(config: dict) -> list[str]:
     share_mode = config.get("share_mode")
     if share_mode not in ("artifact", "local"):
         errors.append(f'share_mode は "artifact" | "local" のいずれかです: {share_mode!r}')
+    # タイポを既定へ黙って倒すと「PR固有差分を見ているつもりで base の進行分も見ている」
+    # 状態になる。撮影対象が変わる設定なので確定前に落とす
+    before_base = config.get("before_base")
+    if before_base not in ("branch_tip", "merge_base"):
+        errors.append(
+            f'before_base は "branch_tip" | "merge_base" のいずれかです: {before_base!r}')
     # SKILL.md 側でシェルコマンドとして実行されるため、非文字列は通さない
     for key in ("lint_command", "cleanup_command"):
         value = config.get(key)

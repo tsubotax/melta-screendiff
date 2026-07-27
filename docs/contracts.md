@@ -33,6 +33,7 @@ SKILL.md（オーケストレーション層 / AIが読む手順書）
   "output_dir": "output/screendiff",   // repo-root相対 or 絶対パス
   "lint_command": null,                // 任意。変更ファイル群を引数に取るlint
   "cleanup_command": null,             // 任意。Cleanup成功後にrepo-rootで1回（下記§1.1）
+  "before_base": "branch_tip",         // "branch_tip"（既定） | "merge_base"（下記§1.3）
   "share_mode": "artifact",            // "artifact"（既定） | "local"（下記§1.2）
   "web": {
     "setup_command": null,             // 任意。checkout直後に1回（npm ci 等）
@@ -71,6 +72,8 @@ load_config.py は後段の silent 事故を防ぐため、**確定前に**以�
 - `web` / `ios` / `screens` がオブジェクトであること、`file_pattern` / `id` / `resolver_command` /
   `serve_command` / `ios.*` が文字列であること（**どんな入力でも traceback を出さない**のがこの
   関数の契約。設定を書き間違えただけの利用者に「プラグインが壊れている」と誤認させない）
+- `before_base` が `"branch_tip"` | `"merge_base"` のいずれかであること
+  — ⚠️ タイポを既定へ倒すと「PR固有差分を見ているつもりで base の進行分も見ている」状態になる
 - `share_mode` が `"artifact"` | `"local"` のいずれかであること
   — ⚠️ タイポを既定値へ黙ってフォールバックさせない。「PRに書き込むかどうか」の分岐であり、
   `"slack"` のような値を無視して `artifact` として実行すると、書き込ませたくないPRに書き込む
@@ -136,6 +139,25 @@ Cleanup で **元refへの復帰と `git stash pop` が成功した後にのみ*
 `--no-artifact`（Artifact機能が使えない環境）は `local` に落とさず `artifact_unavailable`
 として**PR書き込みも止める**。Artifact URL を作れないのに「比較はArtifactにあります」と
 PR本文へ書くと、リンク先の無い案内が残るため。
+
+### 1.3 before_base
+
+OPEN PR で **Before をどのコミットから撮るか**。撮影対象そのものが変わる設定で、
+MERGED PR には効かない（マージコミットの親が Before で、基準が既に固定されているため）。
+
+| 値 | Before | 何が見えるか | base 先行時 |
+|---|---|---|---|
+| `branch_tip`（既定） | base ブランチ先端 | 今の base にこのPRを載せた姿 | **中断**（PRと無関係な差分が混入する） |
+| `merge_base` | PR の分岐点（merge-base） | このPRだけで何が変わったか | **続行**（比較はPR固有の差分のまま） |
+
+**`merge_base` は成功偽装ではない。** base 先行時に `branch_tip` で撮ると「PRが加えていない
+差分」が混ざるのに対し、`merge_base` の比較はPR固有の差分として正しい。ただし
+「今の base に載せたらどう見えるか」は分からないので、preflight が `warning` を返し、
+比較HTMLヘッダにも `Before基準: merge-base（PRの分岐点）` を出す（**黙って基準を変えない**）。
+
+base が日常的に進むリポジトリ（他チームの日次リリースやリリース自動コミットがある等）では
+`branch_tip` の中断ゲートがほぼ毎回発火して運用が回らないため、`merge_base` を選ぶ。
+実行時に `--before-base merge_base` で上書きできる。
 
 ⚠️ **検証で防げないもの**: `serve_command` にSPAフォールバックを持つサーバー（Vite の
 dev / preview は `appType` 既定 `"spa"`、Next.js 等も同様）を指定すると、存在しないパスでも
@@ -224,11 +246,15 @@ web backend は撮影前に対象URLを1回GETし、**`final_url` が要求URL�
   "base_ref": "main",
   "head_ref": "feature/home-carousel",
   // 実際に撮った2コミット（任意だが記録することを強く推奨）。OPEN PRでは preflight_base.py が
-  // 解決したフルOIDをそのまま入れる。MERGED PRでは head=mergeCommit.oid / base=その^1。
-  // 両方が揃っているときだけ比較HTMLのヘッダに短縮OIDが出る（manifest.json はローカルにしか
-  // 残らないため、HTMLだけを受け取った第三者が「何と何を比べたか」を確認できるようにする）
-  "base_oid": "9f1c2b4e5a6d7c8b9a0f1e2d3c4b5a6978890123",
+  // 解決したフルOIDをそのまま入れる。MERGED PRでは head=mergeCommit.oid / before=その^1。
+  // before_oid と head_oid が揃っているときだけ比較HTMLのヘッダに短縮OIDが出る
+  // （manifest.json はローカルにしか残らないため、HTMLだけを受け取った第三者が
+  //   「何と何を比べたか」を確認できるようにする）
+  "before_oid": "9f1c2b4e5a6d7c8b9a0f1e2d3c4b5a6978890123",  // ★実際にBeforeとして撮ったコミット
   "head_oid": "1a2b3c4d5e6f7890abcdef1234567890abcdef12",
+  "base_oid": "9f1c2b4e5a6d7c8b9a0f1e2d3c4b5a6978890123",    // 撮影時点のbaseブランチ先端
+  "merge_base_oid": "9f1c2b4e5a6d7c8b9a0f1e2d3c4b5a6978890123",
+  "before_base": "branch_tip",         // "branch_tip" | "merge_base"（後者はHTMLに明示される）
   "build_status": "SUCCEEDED",         // "SUCCEEDED"を含めばok表示
   "validation_status": "",             // 任意（lint/DS検証等の要約。"PASSED"/"ERROR 0"でok表示）
   "generated_at": "2026-07-24T16:00:00+09:00",
@@ -250,7 +276,11 @@ web backend は撮影前に対象URLを1回GETし、**`final_url` が要求URL�
 ```
 
 旧schema（`before_path`/`after_path` 単数キー、`ds_validation_status`、`ds_error_count`）も
-後方互換で読める。`base_oid`/`head_oid` が無い manifest もそのまま描画できる（チップが出ないだけ）。
+後方互換で読める。OIDが無い manifest もそのまま描画できる（チップが出ないだけ）。`before_oid` が
+無ければ `base_oid` を Before として扱う（`before_oid` 導入前のスキーマ）。
+
+⚠️ **`merge_base` モードでは `base_oid` を表示に使ってはいけない。** 撮ったのは base 先端では
+なく分岐点であり、`base_oid` を出すと「撮っていないコミット」を提示することになる。
 
 ## 5. preflight 契約（preflight_base.py）
 
@@ -260,12 +290,18 @@ OPEN PR の Before は「撮影時点の base ブランチ先端」から撮る�
 
 ```jsonc
 {
-  "status": "ok",          // exit 0。base は HEAD の祖先
-  "base_oid": "9f1c…",     // 解決後のフルOID（manifest にそのまま転記する）
-  "head_oid": "1a2b…"
+  "status": "ok",              // base は HEAD の祖先
+  "mode": "branch_tip",        // "branch_tip" | "merge_base"
+  "blocking": false,           // exit 0 は blocking が false のときだけ
+  "before_oid": "9f1c…",       // ★Before として checkout すべきコミット（呼び出し元は組み立て直さない）
+  "base_oid": "9f1c…", "head_oid": "1a2b…", "merge_base_oid": "9f1c…"
 }
-{"status": "base_ahead", "message": "...", "hint": "..."}  // exit 1。撮影に進んではいけない
-{"status": "error", "error": "...", "details": [...]}      // exit 1。OID解決不能・git異常終了
+// base 先行 + branch_tip → 撮影に進んではいけない（exit 1）
+{"status": "base_ahead", "blocking": true, "message": "...", "hint": "..."}
+// base 先行 + merge_base → 分岐点から撮って続行（exit 0）。warning は必ずユーザーへ伝える
+{"status": "base_ahead", "blocking": false, "before_oid": "<merge-base>", "warning": "..."}
+// OID解決不能・共通祖先なし・git異常終了（exit 1）
+{"status": "error", "blocking": true, "error": "...", "details": [...]}
 ```
 
 `base_ahead` と `error` を**分けているのが要点**。`git merge-base --is-ancestor` は「祖先でない」も

@@ -54,9 +54,8 @@ def _run(repo: str, base: str, head: str, *extra: str) -> tuple[int, dict, str]:
     return proc.returncode, out, proc.stderr
 
 
-@unittest.skipIf(shutil.which('git') is None, 'git が無い環境')
-class TestPreflightBase(unittest.TestCase):
-    """base が先行した履歴を実際に作って検査する"""
+class _RepoFixture:
+    """base が先行した履歴を実際に作るための共通 fixture（それ自体はテストではない）"""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -80,6 +79,11 @@ class TestPreflightBase(unittest.TestCase):
         ahead = _commit(self.repo, 'base commit 2 (別PRのマージ相当)')
         _git(self.repo, 'checkout', '-q', 'feature')
         return ahead
+
+
+@unittest.skipIf(shutil.which('git') is None, 'git が無い環境')
+class TestPreflightBase(_RepoFixture, unittest.TestCase):
+    """既定モード（branch_tip）: base 先行を撮影前に止める"""
 
     def test_base_is_ancestor_passes(self):
         """PR が最新の base の上にある通常ケース"""
@@ -138,6 +142,76 @@ class TestPreflightBase(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertEqual(out['status'], 'error')
             self.assertNotIn('Traceback', stderr)
+
+    def test_before_oid_is_base_when_ancestor(self):
+        """撮るコミットを before_oid で明示的に返す（呼び出し元が組み立て直さない）"""
+        code, out, _ = _run(self.repo, self.branch_point, self.head)
+        self.assertEqual(out['before_oid'], self.branch_point)
+        self.assertEqual(out['merge_base_oid'], self.branch_point)
+
+
+@unittest.skipIf(shutil.which('git') is None, 'git が無い環境')
+class TestMergeBaseMode(_RepoFixture, unittest.TestCase):
+    """base が日常的に進むリポジトリ向けモード（中断せず分岐点から撮る）"""
+
+    def test_base_ahead_does_not_block(self):
+        """本丸: base 先行でも中断せず、merge-base を Before にする"""
+        ahead = self._advance_base()
+        code, out, stderr = _run(self.repo, ahead, self.head, '--mode', 'merge_base',
+                                 '--base-ref', 'main')
+        self.assertEqual(code, 0, msg=json.dumps(out, ensure_ascii=False))
+        self.assertEqual(out['status'], 'base_ahead')
+        self.assertFalse(out['blocking'])
+        # 撮るのは base 先端ではなく分岐点
+        self.assertEqual(out['before_oid'], self.branch_point)
+        self.assertEqual(out['merge_base_oid'], self.branch_point)
+        self.assertNotEqual(out['before_oid'], ahead)
+        # 「base先端ではない」ことを黙って進めない
+        self.assertIn('merge-base', out['warning'])
+        self.assertNotIn('Traceback', stderr)
+
+    def test_ancestor_case_matches_branch_tip(self):
+        """base が祖先なら merge-base == base。モードで結果が変わらない"""
+        code, out, _ = _run(self.repo, self.branch_point, self.head, '--mode', 'merge_base')
+        self.assertEqual(code, 0)
+        self.assertEqual(out['status'], 'ok')
+        self.assertEqual(out['before_oid'], self.branch_point)
+        self.assertNotIn('warning', out)
+
+    def test_unknown_oid_still_blocks(self):
+        """モードを緩めても、OIDが解決できないのは別問題として止める"""
+        code, out, stderr = _run(self.repo, '0' * 40, self.head, '--mode', 'merge_base')
+        self.assertEqual(code, 1)
+        self.assertEqual(out['status'], 'error')
+        self.assertTrue(out['blocking'])
+        self.assertNotIn('Traceback', stderr)
+
+    def test_unrelated_histories_are_error(self):
+        """共通祖先が無ければ比較の基準を作れない。0件成功に倒さない"""
+        orphan = _git(self.repo, 'commit-tree', '-m', 'orphan',
+                      _git(self.repo, 'rev-parse', 'HEAD^{tree}'))
+        for mode in ('branch_tip', 'merge_base'):
+            with self.subTest(mode=mode):
+                code, out, stderr = _run(self.repo, orphan, self.head, '--mode', mode)
+                self.assertEqual(code, 1)
+                self.assertEqual(out['status'], 'error')
+                self.assertIn('共通祖先', out['error'])
+                self.assertNotIn('Traceback', stderr)
+
+
+@unittest.skipIf(shutil.which('git') is None, 'git が無い環境')
+class TestBranchTipModeStillBlocks(_RepoFixture, unittest.TestCase):
+    """既定モードの厳しさを緩めていないこと（後方互換）"""
+
+    def test_default_mode_blocks_base_ahead(self):
+        ahead = self._advance_base()
+        for args in ((), ('--mode', 'branch_tip')):
+            with self.subTest(args=args):
+                code, out, _ = _run(self.repo, ahead, self.head, *args)
+                self.assertEqual(code, 1)
+                self.assertEqual(out['status'], 'base_ahead')
+                self.assertTrue(out['blocking'])
+                self.assertIn('merge_base', out['hint'])  # 逃げ道を案内する
 
 
 if __name__ == '__main__':

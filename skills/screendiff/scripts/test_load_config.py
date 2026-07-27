@@ -121,6 +121,23 @@ class TestOptionalCommandsAndShareMode(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn('share_mode', json.dumps(res['json'], ensure_ascii=False))
 
+    def test_before_base_default_is_branch_tip(self):
+        """既定は従来動作（base先端 + 中断ゲート）"""
+        code, res = _run_config(WEB_OK)
+        self.assertEqual(code, 0)
+        self.assertEqual(res['json']['before_base'], 'branch_tip')
+
+    def test_before_base_merge_base_is_accepted(self):
+        code, res = _run_config(_with(WEB_OK, before_base='merge_base'))
+        self.assertEqual(code, 0)
+        self.assertEqual(res['json']['before_base'], 'merge_base')
+
+    def test_unknown_before_base_is_rejected(self):
+        """タイポを既定へ倒すと、撮影対象が意図と違うまま気づけない"""
+        code, res = _run_config(_with(WEB_OK, before_base='mergebase'))
+        self.assertEqual(code, 1)
+        self.assertIn('before_base', json.dumps(res['json'], ensure_ascii=False))
+
     def test_cleanup_command_string_is_accepted(self):
         code, res = _run_config(_with(WEB_OK, cleanup_command='npm run clean --if-present'))
         self.assertEqual(code, 0)
