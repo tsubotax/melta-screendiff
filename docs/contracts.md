@@ -153,8 +153,14 @@ MERGED PR には効かない（マージコミットの親が Before で、基�
 
 **`merge_base` は成功偽装ではない。** base 先行時に `branch_tip` で撮ると「PRが加えていない
 差分」が混ざるのに対し、`merge_base` の比較はPR固有の差分として正しい。ただし
-「今の base に載せたらどう見えるか」は分からないので、preflight が `warning` を返し、
-比較HTMLヘッダにも `Before基準: merge-base（PRの分岐点）` を出す（**黙って基準を変えない**）。
+「今の base に載せたらどう見えるか」は分からないので、**基準が変わったことを必ず伝える**:
+
+- **主経路は比較HTMLヘッダの `Before基準: merge-base（PRの分岐点）` チップ**（HTMLだけ
+  受け取った第三者に届く唯一の経路なので必須）
+- チャットへの報告は preflight が返す `info` の1行（先行コミット数つき）。このモードでは
+  base 先行が常態なので大警告にはしない — 毎回出る警告は読み飛ばされ、
+  「config で明示的に選んだモードの再通知」にしかならない。数字を出すことで
+  「いつもより離れている」ことには気づける状態を保つ
 
 base が日常的に進むリポジトリ（他チームの日次リリースやリリース自動コミットがある等）では
 `branch_tip` の中断ゲートがほぼ毎回発火して運用が回らないため、`merge_base` を選ぶ。
@@ -326,8 +332,10 @@ OPEN PR の Before は「撮影時点の base ブランチ先端」から撮る�
 }
 // base 先行 + branch_tip → 撮影に進んではいけない（exit 1）
 {"status": "base_ahead", "blocking": true, "message": "...", "hint": "..."}
-// base 先行 + merge_base → 分岐点から撮って続行（exit 0）。warning は必ずユーザーへ伝える
-{"status": "base_ahead", "blocking": false, "before_oid": "<merge-base>", "warning": "..."}
+// base 先行 + merge_base → 分岐点から撮って続行（exit 0）
+// info は1行で報告する（このモードでは常態。大警告にすると読み飛ばされる）
+{"status": "base_ahead", "blocking": false, "before_oid": "<merge-base>",
+ "info": "base（main）は分岐後 12 コミット進行（Before は分岐点基準）", "base_ahead_count": 12}
 // OID解決不能・共通祖先なし・git異常終了（exit 1）
 {"status": "error", "blocking": true, "error": "...", "details": [...]}
 ```

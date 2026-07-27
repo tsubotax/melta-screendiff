@@ -183,7 +183,7 @@ for k in ("before_oid", "base_oid", "head_oid", "merge_base_oid", "mode"):
 
 - `PREFLIGHT_NG` かつ `status: base_ahead`（`branch_tip` モード）なら**撮影に進まず中断**し、`message` / `hint` をそのまま提示してCleanupへ進む。「とりあえず撮って差分を見る」で継続しない。baseが日常的に進むリポジトリなら `before_base: "merge_base"` を案内する
 - `PREFLIGHT_NG` かつ `status: error` は fetch漏れ・OID不正・共通祖先なしであって「base先行」ではない。原因を提示して中断する（両者を同じ結論に潰さない）
-- `PREFLIGHT_OK` で `warning` が付いている場合（`merge_base` モードで base が先行）は、**その warning をユーザーへの報告に必ず含める**。「今の base に載せたらどう見えるか」は分からない比較であることを黙って伏せない
+- `PREFLIGHT_OK` で `info` が付いている場合（`merge_base` モードで base が先行）は、**その1行をそのまま報告に含める**（例: `base（main）は分岐後 12 コミット進行（Before は分岐点基準）`）。このモードでは base 先行が常態なので**大きな警告にはしない** — 毎回出る警告は読み飛ばされる。基準が変わったことの主たる伝達経路は比較HTMLヘッダの `Before基準` チップで、報告側は数字を出して「いつもより離れている」ことに気づける状態を保つ役割
 - `PREFLIGHT_OK` なら出力の `before_oid` / `base_oid` / `head_oid` / `merge_base_oid` を控える。**Phase 4 の Before checkout は `before_oid`**（撮るべきコミットとして確定済み。自分で組み立て直さない）、Phase 5 で manifest に記録する
 
 MERGED PR ではこのチェックは**実行しない**。マージコミットの親から Before を取る経路は比較の基準が既に固定されており、base が動きうるという前提が成り立たない。代わりに manifest 用のOIDだけ控える:

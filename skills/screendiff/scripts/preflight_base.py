@@ -21,7 +21,9 @@
     merge_base + base が祖先        → ok（merge-base は base と一致）
     merge_base + base が先行        → base_ahead / **続行**（exit 0）。before = merge-base。
                                       比較は PR 固有差分として正しいので成功偽装にならない。
-                                      warning を返すので比較HTMLとユーザーへ明示すること
+                                      このモードでは常態なので大警告ではなく `info`（1行 +
+                                      先行コミット数）を返す。基準が変わったことの主たる
+                                      伝達経路は比較HTMLヘッダの Before基準 チップ側
 
 MERGED PR には適用しない。マージコミットの親から Before を取る経路は比較の基準が既に
 固定されており、「base が動きうる」という前提が成り立たない。
@@ -128,14 +130,22 @@ def main() -> int:
 
     # ここから base 先行。モードで扱いが分かれる
     if args.mode == "merge_base":
+        # このモードでは base 先行が常態になる（そのために選ぶモード）。毎回大きな警告を
+        # 出すと確実に読み飛ばされるので、**1行の info に数字を添えて**返す。
+        # 「基準が変わった」ことの主たる伝達経路は比較HTMLヘッダの Before基準 チップ側。
+        # 数字が入っていれば「いつもより離れている」ことには引っかかる
+        count_code, count_out, _ = git(args.repo_root, "rev-list", "--count",
+                                       f"{merge_base_oid}..{base_oid}")
+        ahead = count_out if count_code == 0 and count_out.isdigit() else None
         result.update({
             "status": "base_ahead", "blocking": False,
             "before_oid": merge_base_oid,
-            "message": (f"base（{base_label}）は PR の分岐後に進んでいますが、"
-                        "Before は merge-base（PRの分岐点）から撮るため比較は PR 固有の差分のままです"),
-            "warning": ("Before は base の先端ではなく merge-base 基準です。"
-                        "「今の base に載せたらどう見えるか」は分かりません"),
+            "info": (f"base（{base_label}）は分岐後 {ahead} コミット進行（Before は分岐点基準）"
+                     if ahead is not None
+                     else f"base（{base_label}）は分岐後に進行（Before は分岐点基準）"),
         })
+        if ahead is not None:
+            result["base_ahead_count"] = int(ahead)
         return emit(result, 0)
 
     result.update({

@@ -166,9 +166,21 @@ class TestMergeBaseMode(_RepoFixture, unittest.TestCase):
         self.assertEqual(out['before_oid'], self.branch_point)
         self.assertEqual(out['merge_base_oid'], self.branch_point)
         self.assertNotEqual(out['before_oid'], ahead)
-        # 「base先端ではない」ことを黙って進めない
-        self.assertIn('merge-base', out['warning'])
+        # 「base先端ではない」ことを黙って進めない。ただし毎回出るので1行のinfoに留める
+        self.assertIn('分岐点基準', out['info'])
+        self.assertEqual(len(out['info'].splitlines()), 1)
+        self.assertNotIn('warning', out)   # 大警告に戻していないこと
         self.assertNotIn('Traceback', stderr)
+
+    def test_info_carries_ahead_count(self):
+        """数字が入っていれば「いつもより離れている」ことには気づける"""
+        self._advance_base()
+        ahead2 = self._advance_base()   # 分岐後 2 コミット進行
+        code, out, _ = _run(self.repo, ahead2, self.head, '--mode', 'merge_base',
+                            '--base-ref', 'main')
+        self.assertEqual(code, 0)
+        self.assertEqual(out['base_ahead_count'], 2)
+        self.assertIn('2 コミット', out['info'])
 
     def test_ancestor_case_matches_branch_tip(self):
         """base が祖先なら merge-base == base。モードで結果が変わらない"""
@@ -176,7 +188,8 @@ class TestMergeBaseMode(_RepoFixture, unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(out['status'], 'ok')
         self.assertEqual(out['before_oid'], self.branch_point)
-        self.assertNotIn('warning', out)
+        self.assertNotIn('info', out)          # 先行していないので報告する情報も無い
+        self.assertNotIn('base_ahead_count', out)
 
     def test_unknown_oid_still_blocks(self):
         """モードを緩めても、OIDが解決できないのは別問題として止める"""
