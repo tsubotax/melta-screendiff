@@ -23,10 +23,15 @@ config が読めない・作成できない場合は exit 1。
 """
 import argparse
 import json
-import os
+import re
 import sys
 import time
 from pathlib import Path
+
+# パス区切りだけを弾くと "." と ".." が通り、出力先がPRディレクトリの外へ出る。
+# 先頭は英数字に限定し、以降も安全な文字だけ許す（許可リスト方式）
+SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+MAX_RUN_ID_SUFFIX = 100
 
 
 def emit(payload: dict, code: int) -> int:
@@ -75,16 +80,37 @@ def main() -> int:
     if not base.is_absolute():
         base = Path(args.repo_root) / base
 
-    run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S")
-    if os.sep in run_id or (os.altsep and os.altsep in run_id):
-        return emit({"error": f"run-id にパス区切りは使えません: {run_id!r}"}, 1)
+    if not re.fullmatch(r"\d+", str(args.pr)):
+        # PR番号はパス要素になる。"../x" のような値を通さない
+        return emit({"error": f"--pr は正の整数です: {args.pr!r}"}, 1)
+    if args.run_id is not None and not SAFE_NAME.fullmatch(args.run_id):
+        return emit({"error": f"run-id に使えない文字が含まれています: {args.run_id!r}",
+                     "hint": "英数字で始まり、英数字と - _ . のみ使えます"}, 1)
 
     pr_dir = base / str(args.pr)
-    out_dir = pr_dir / run_id
-    try:
-        out_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        return emit({"error": f"出力ディレクトリを作成できません: {out_dir} ({e})"}, 1)
+    # ⚠️ exist_ok=True で作らない。既定の run-id は秒精度なので、同じ秒に2回起動すると
+    # 同じディレクトリを共有し、固定名ファイル（comparison.html 等）が前回を上書きする
+    # ＝「実行ごとに分ける」目的が静かに崩れる
+    if args.run_id is not None:
+        candidates = [args.run_id]
+    else:
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        candidates = [stamp] + [f"{stamp}-{i}" for i in range(2, MAX_RUN_ID_SUFFIX + 1)]
+
+    for run_id in candidates:
+        out_dir = pr_dir / run_id
+        try:
+            out_dir.mkdir(parents=True, exist_ok=False)
+            break
+        except FileExistsError:
+            continue
+        except OSError as e:
+            return emit({"error": f"出力ディレクトリを作成できません: {out_dir} ({e})"}, 1)
+    else:
+        if args.run_id is not None:
+            return emit({"error": f"指定された run-id のディレクトリが既にあります: {pr_dir / args.run_id}",
+                         "hint": "前回の実行結果を上書きしないため、別の run-id を指定してください"}, 1)
+        return emit({"error": f"空きの run-id を見つけられません: {pr_dir}"}, 1)
 
     return emit({
         "out_dir": str(out_dir.resolve()),

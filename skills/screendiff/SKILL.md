@@ -80,12 +80,14 @@ CONFIG_NGなら、出力の `error` / `searched` / `details` / `hint` を提示�
 続けて**この実行専用の出力ディレクトリ**を作る。出力先を `output_dir/<PR>` に固定すると、同一PRの撮り直し（レビュー指摘 → 修正 push → 再撮影。**例外ではなく通常運用**）が同じ場所を使い、前イテレーションの証跡が消える／中断した回に前回の `comparison.html` が残る:
 
 ```bash
-RUN_DIR_JSON=$(python3 "$SCRIPTS/run_dir.py" --config-json "$CONFIG_JSON" \
-  --repo-root "$REPO_ROOT" --pr "$PR") && echo "$RUN_DIR_JSON"
-OUT_DIR=<出力の out_dir>   # 絶対パス。以降の出力は全てこの下に置く
+python3 "$SCRIPTS/run_dir.py" --config-json "$CONFIG_JSON" --repo-root "$REPO_ROOT" --pr "$PR" \
+  > "$RUN_DIR_JSON" && echo "RUN_DIR_OK" || echo "RUN_DIR_NG"   # RUN_DIR_JSON=$(mktemp -t screendiff-rundir)
+cat "$RUN_DIR_JSON"
 ```
 
-`latest`（`output_dir/<PR>/latest`）が最新実行を指すので、共有・添付時の安定参照に使える。**過去の実行ディレクトリは消さない。**
+`RUN_DIR_NG` なら**ここで終了**する（出力先が無いまま撮影に進まない）。`RUN_DIR_OK` なら出力の `out_dir` を `OUT_DIR` として控える（絶対パス。以降の出力は全てこの下に置く）。
+
+`latest`（`output_dir/<PR>/latest`）は最新実行を指すが、**`latest` が `null` で返ることがある**（利用者が同名のディレクトリを置いている、symlink を作れない環境）。その場合は latest に触れず、共有・報告には常に実体の `$OUT_DIR` を使う。**過去の実行ディレクトリは消さない。**
 
 ## Phase 1: 適用範囲判定 + 事前安全性チェック + 退避
 
@@ -155,12 +157,24 @@ OPEN PR の Before をどのコミットから撮るかを、**撮影前に**確
 ```bash
 git fetch origin "<baseRefName>" && BASE_OID=$(git rev-parse FETCH_HEAD) && echo "BASE_OID=$BASE_OID"
 python3 "$SCRIPTS/preflight_base.py" --repo-root "$REPO_ROOT" \
-  --base-oid "$BASE_OID" --head-oid "$HEAD_OID" --mode "<config.before_base>" \
+  --base-oid "$BASE_OID" --head-oid "$HEAD_OID" --mode "<実効モード>" \
   --base-ref "<baseRefName>" --head-ref "<headRefName>" \
-  && echo "PREFLIGHT_OK" || echo "PREFLIGHT_NG"
+  > "$PREFLIGHT_JSON" && echo "PREFLIGHT_OK" || echo "PREFLIGHT_NG"   # PREFLIGHT_JSON="$OUT_DIR/preflight-base.json"
+cat "$PREFLIGHT_JSON"
 ```
 
-**Before をどこから撮るかは `<config.before_base>` が決める**（既定 `branch_tip`。実行時に `--before-base merge_base` の明示指定があればそちらを優先し、その値を `--mode` に渡す）:
+`PREFLIGHT_OK` なら、後続で使う値を**目で拾わず機械的に取り出す**（モードとOIDの食い違いを作らないため。ここを手作業にすると「merge-base で撮ったのに manifest は branch_tip」が起こる）:
+
+```bash
+python3 -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+for k in ("before_oid", "base_oid", "head_oid", "merge_base_oid", "mode"):
+    print(f"{k}={d.get(k, \"\")}")' "$PREFLIGHT_JSON"
+```
+
+出力の `before_oid` / `mode` が空なら**中断**する（preflight の出力が契約どおりでない）。空でなければ `BEFORE_OID` / `BASE_OID` / `HEAD_OID` / `MERGE_BASE_OID` / `BEFORE_BASE`（= `mode`）として控える。**`BEFORE_BASE` は config の値ではなく preflight が実際に使ったモード**（実行時 override を反映済み）。
+
+**Before をどこから撮るかは `<実効モード>` が決める** — 実行時の明示指定（`--before-base merge_base`）があればそれ、無ければ `<config.before_base>`（既定 `branch_tip`）。この値を `--mode` に渡す:
 
 | モード | Before | base が先行していたら |
 |---|---|---|
@@ -174,7 +188,7 @@ python3 "$SCRIPTS/preflight_base.py" --repo-root "$REPO_ROOT" \
 
 MERGED PR ではこのチェックは**実行しない**。マージコミットの親から Before を取る経路は比較の基準が既に固定されており、base が動きうるという前提が成り立たない。代わりに manifest 用のOIDだけ控える:
 
-- `PARENT_COUNT=2`: `HEAD_OID=$MERGE_OID`、`BASE_OID=$(git rev-parse "${MERGE_OID}^1")`、`BEFORE_OID=$BASE_OID`
+- `PARENT_COUNT=2`: `HEAD_OID=$MERGE_OID`、`BASE_OID=$(git rev-parse "${MERGE_OID}^1")`、`BEFORE_OID=$BASE_OID`、`BEFORE_BASE=merge_parent`（`MERGE_BASE_OID` はこの経路では算出しない）
 - `PARENT_COUNT=1`（squash/rebase merge）: **`^1` を BASE_OID にしない。** 上の分岐で「`^1` はBeforeとして信頼できない」と判断した対象そのもので、記録すると誤った監査記録が残る。ユーザーに確認したbase側コミットのSHAを `BASE_OID` にする（確認が取れていなければ `base_oid` は記録しない）
 
 ### 画面解決
@@ -329,7 +343,9 @@ gh pr diff "$PR" --name-only | <target_file_patternsでフィルタ> | xargs <co
 
 ## Phase 4: Before取得
 
-全画面が新規（`kind: new`）ならこのフェーズの本体処理をスキップする（Cleanupには必ず進む）。
+全画面が新規（`kind: new`）ならこのフェーズの本体処理をスキップする（`BEFORE_CAPTURED=false`。Cleanupには必ず進む）。
+
+**`BEFORE_CAPTURED` を必ず控える。** Before 側を実際に checkout して1画面以上撮影できたときだけ `true`。Phase 5 の manifest（OIDを書くか）と Phase 7 の定型文（「Before/After比較」と書いてよいか）がこの値で変わる。
 
 ```bash
 cd "$REPO_ROOT"
@@ -338,12 +354,12 @@ cd "$REPO_ROOT"
 - **OPENなPR**: `git checkout --detach "$BEFORE_OID" && echo "CHECKOUT_OK" || echo "CHECKOUT_FAILED"`（Phase 2 の preflight が返した `before_oid`。ここで再fetchして`FETCH_HEAD`を取り直すと、検証したコミットと撮るコミットがズレて preflight が意味を失う。`git checkout origin/<baseRefName>`もstaleなremote-trackingを踏むため使わない）
 - **MERGED済みPR（PARENT_COUNT=2）**: `git checkout --detach "${MERGE_OID}^1" && echo "CHECKOUT_OK" || echo "CHECKOUT_FAILED"`（fetch不要。マージコミット自体がローカル履歴に含まれている）
 
-CHECKOUT_FAILEDの場合はCleanupへ進み、「Beforeブランチ取得に失敗したためAfterのみの比較になります」と報告する。
+CHECKOUT_FAILEDの場合は `BEFORE_CAPTURED=false` としてCleanupへ進み、「Beforeブランチ取得に失敗したためAfterのみの比較になります」と報告する。
 
 CHECKOUT_OKなら、Phase 3と同じbackend手順を `--prefix before` で実行する。ただし:
 
 - 撮影は「既存」判定された画面のみ（新規画面はBeforeが存在しない）。
-- **Beforeのビルド/起動失敗は「PR起因ではない可能性が高い」旨を明記し、Afterのみの比較として継続する**（スキル全体は失敗させない。Cleanupには進む）。
+- **Beforeのビルド/起動失敗は「PR起因ではない可能性が高い」旨を明記し、Afterのみの比較として継続する**（スキル全体は失敗させない。Cleanupには進む）。この場合も `BEFORE_CAPTURED=false`。
 - webは**serverを必ず立て直す**（Phase 3で止めた状態から。事前のPORT_BUSYチェックも再度行う）。撮影後また止める。
 - iosのgenerated_project_fileガードもPhase 3と全く同様に実行する（破棄せず持ち越すとCleanupでの復帰後にdirtyとして残る）。
 
@@ -351,7 +367,17 @@ CHECKOUT_OKなら、Phase 3と同じbackend手順を `--prefix before` で実行
 
 各画面のbefore/after PNG（**全ページ**。スクロール下部の変更を見落とさない）をReadツールで実際に確認し、1〜2行の変更点コメントを`description`として書く（プレーンテキスト。render側でHTMLエスケープされる）。
 
-manifest.json（契約は `docs/contracts.md` §4）を`$OUT_DIR`に組み立てる。`*_paths` にはcapture JSONの `files` をページ順のまま渡し、`truncated`/`fallback_single`/`paging_failed` フラグも同JSONから転記する（**失敗を成功偽装しない**。フラグは比較HTMLに警告表示される）。Phase 2 で控えたOIDを `before_oid`（実際にBeforeとして撮ったコミット）/ `head_oid` / `base_oid` / `merge_base_oid` として記録し、モードを `before_base` に入れる（監査記録。`before_oid` と `before_base` は比較HTMLのヘッダにも出る）:
+manifest.json（契約は `docs/contracts.md` §4）を`$OUT_DIR`に組み立てる。`*_paths` にはcapture JSONの `files` をページ順のまま渡し、`truncated`/`fallback_single`/`paging_failed` フラグも同JSONから転記する（**失敗を成功偽装しない**。フラグは比較HTMLに警告表示される）。
+
+OIDの記録規則（`before_oid` と `before_base` は比較HTMLのヘッダにも出るため、**撮っていないものを書かない**）:
+
+| 経路 | `before_oid` | `before_base` | その他 |
+|---|---|---|---|
+| OPEN・Before撮影済み | Phase 2 の `BEFORE_OID` | Phase 2 の `BEFORE_BASE` | `base_oid` / `merge_base_oid` / `head_oid` |
+| MERGED（`PARENT_COUNT=2`） | `${MERGE_OID}^1` | `"merge_parent"` | `head_oid`。**`merge_base_oid` は記録しない**（この経路では算出していない） |
+| **Before を撮っていない**（全画面が新規／Before checkout失敗／Beforeビルド失敗） | **記録しない** | 記録しない | `head_oid` のみ |
+
+⚠️ 最後の行が重要。`before_base` を無条件に書くと、**Afterしか撮っていない回に「Beforeは○○基準」と表示され、片側撮影が両側成功に見える**。Before 側を実際に checkout して撮影できたか（`BEFORE_CAPTURED=true/false`）を控えておき、false なら OID 系は `head_oid` だけにする。
 
 ```bash
 python3 "$SCRIPTS/render_comparison.py" \
@@ -360,7 +386,7 @@ python3 "$SCRIPTS/render_comparison.py" \
   && echo "COMPARISON_READY=true" || echo "COMPARISON_READY=false"
 ```
 
-⚠️ **`COMPARISON_READY` を必ず控える。** `$OUT_DIR` は `output_dir/$PR` で同じPRの再実行では同じ場所になるため、**前回実行の `comparison.html` が残っている**。Phase 2〜4 で中断した回にファイルの存在だけで判断すると、今回撮っていない古い比較結果を「このPRの比較」として共有してしまう。今回の実行でrenderが成功した場合のみ `true`。**このフェーズに到達せず中断した場合は `false`。**
+⚠️ **`COMPARISON_READY` を必ず控える。** 出力先は Phase 0 で実行ごとに分けてあるが、それとは独立した共有ゲートとして必要。「ファイルが存在するか」ではなく「**今回の実行でrenderが成功したか**」で共有の可否を決める（`latest` 経由の参照や、同じ `$OUT_DIR` を指したまま再試行する経路でも判断が揺れないようにするため）。renderが成功した場合のみ `true`。**このフェーズに到達せず中断した場合は `false`。**
 
 画像は生成時にbase64埋め込み済みなので追加変換は不要。**生成した時点ではまだ配布しない** — 先に Phase 6（Cleanup）を実行する。作業ツリーが壊れたままPRへ書き込むと、外向きの取り消せない操作だけが進んで手元の破損が放置される。
 
@@ -413,7 +439,7 @@ curl -s -o /dev/null --max-time 2 "<config.web.serve_url>" && echo "SERVER_STILL
 
 **`COMPARISON_READY=true` かつ Phase 6 が全て成功した場合のみ**進む。
 
-`COMPARISON_READY=false`（Phase 2〜4 で中断した、renderが失敗した）の場合は**このフェーズに入らない**。Cleanupの結果と中断理由を報告して終了する。`$OUT_DIR` に前回実行の `comparison.html` が残っていても**提示しない**（今回撮っていないものを「このPRの比較」として渡すことになる）。
+`COMPARISON_READY=false`（Phase 2〜4 で中断した、renderが失敗した）の場合は**このフェーズに入らない**。Cleanupの結果と中断理由を報告して終了する。過去の実行ディレクトリや `latest` に `comparison.html` があっても**提示しない**（今回撮っていないものを「このPRの比較」として渡すことになる）。
 
 まず許可アクションを確定する。**分岐を目で追わず、この出力に従う**（PRへの書き込みは外向きで取り消せないため、判断を散文に置かない）:
 
@@ -430,10 +456,13 @@ python3 "$SCRIPTS/share_plan.py" --config-json "$CONFIG_JSON" \
 1. `comparison.html` の**絶対パス**（`$OUT_DIR/comparison.html`）を提示する。ブラウザで開く手順も添える
 2. Artifactは発行しない。**PRへの書き込み（`gh pr comment` / `gh pr edit`）は一切しない**
 3. 変更画面の要約（Phase 5 で書いた `description`）はチャットに提示してよい。PRやチャットツールへ貼るかどうかはユーザーが手で決める
-4. ユーザーがPRへ手で貼れるよう、1行の定型文も**提示だけ**する（**AIは投稿しない**）:
+4. ユーザーがPRへ手で貼れるよう、1行の定型文も**提示だけ**する（**AIは投稿しない**）。`BEFORE_CAPTURED` で文面を変える — Afterしか撮っていない回に「Before/After比較」と書くのは成功偽装:
 
 ```
+# BEFORE_CAPTURED=true
 【Before/After比較（実キャプチャ）】別途共有（比較コミット: <before_oid短縮>...<head_oid短縮>）
+# BEFORE_CAPTURED=false（全画面が新規 / Before取得失敗）
+【Afterのみのキャプチャ】別途共有（<理由: 全画面が新規 / Before取得失敗> / After: <head_oid短縮>）
 ```
 
 ここで終了する。下記のPRコメント下書きには進まない。
@@ -516,7 +545,9 @@ gh pr comment "$PR" --body-file "$OUT_DIR/comment-draft.md"
 | マージ済み・親1つ（squash/rebase） | Before自動特定を諦め、ユーザーにbase側コミットを確認 |
 | `git checkout`/`git fetch`失敗 | 後続を実行せず即中断・Cleanupへ進み状態を報告 |
 | Cleanupでのserver停止・復帰・stash pop・cleanup_command失敗 | 黙って進まず`git status`/`git stash list`を提示し判断を仰ぐ。**Phase 7の共有には進まない** |
-| 撮影前・撮影中に中断した（`COMPARISON_READY=false`） | Cleanupは実行、Phase 7には入らない。前回実行の`comparison.html`が残っていても提示しない |
+| 撮影前・撮影中に中断した（`COMPARISON_READY=false`） | Cleanupは実行、Phase 7には入らない。過去の実行の`comparison.html`が残っていても提示しない |
+| Beforeを撮っていない（全画面新規/Before取得失敗） | `BEFORE_CAPTURED=false`。manifestに`before_oid`/`before_base`を書かず、local定型文も「Afterのみ」に切り替える |
+| `latest`が張れない（同名ディレクトリ/symlink不可） | `latest: null`。latestに触れず実体の`$OUT_DIR`で報告・共有する |
 | `gh pr checkout`後のHEADが`headRefOid`と不一致 | 未pushのローカルコミットを撮る事故。中断してユーザー確認（勝手に`--force`しない） |
 | `SHARE_MODE=local` | comparison.htmlの絶対パス提示で完了。Artifact発行もPRへの書き込みもしない |
 | Artifact機能が使えない環境 | `artifact`指定でも絶対パス提示に倒す（PRへの書き込みはしない） |

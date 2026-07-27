@@ -172,7 +172,13 @@ base が日常的に進むリポジトリ（他チームの日次リリースや
    （SKILL.md 側の `COMPARISON_READY` と合わせた多層防御。片方だけに頼らない）
 
 既存ファイルは一切消さない。`latest` が symlink 以外（利用者が作ったディレクトリ等）なら
-触らず `latest: null` を返す。
+触らず `latest: null` を返す（呼び出し元は latest に触れず実体パスを使う）。
+
+既定の run-id は秒精度のため、**`exist_ok=False` で作り、衝突したら連番を足して再採番する**
+（同じ秒に2回起動して同一ディレクトリを共有すると、固定名ファイルが前回を上書きし
+「実行ごとに分ける」目的が静かに崩れる）。`--run-id` を明示して既存と衝突した場合は
+再利用せずエラーにする。run-id / PR番号はパス要素になるため許可文字を限定する
+（`.` `..` はパス区切りを含まないので、区切り文字チェックだけでは通ってしまう）。
 
 ⚠️ **検証で防げないもの**: `serve_command` にSPAフォールバックを持つサーバー（Vite の
 dev / preview は `appType` 既定 `"spa"`、Next.js 等も同様）を指定すると、存在しないパスでも
@@ -267,9 +273,9 @@ web backend は撮影前に対象URLを1回GETし、**`final_url` が要求URL�
   //   「何と何を比べたか」を確認できるようにする）
   "before_oid": "9f1c2b4e5a6d7c8b9a0f1e2d3c4b5a6978890123",  // ★実際にBeforeとして撮ったコミット
   "head_oid": "1a2b3c4d5e6f7890abcdef1234567890abcdef12",
-  "base_oid": "9f1c2b4e5a6d7c8b9a0f1e2d3c4b5a6978890123",    // 撮影時点のbaseブランチ先端
-  "merge_base_oid": "9f1c2b4e5a6d7c8b9a0f1e2d3c4b5a6978890123",
-  "before_base": "branch_tip",         // "branch_tip" | "merge_base"（後者はHTMLに明示される）
+  "base_oid": "9f1c2b4e5a6d7c8b9a0f1e2d3c4b5a6978890123",    // 撮影時点のbaseブランチ先端（OPENのみ）
+  "merge_base_oid": "9f1c2b4e5a6d7c8b9a0f1e2d3c4b5a6978890123",  // OPENのみ
+  "before_base": "branch_tip",         // "branch_tip" | "merge_base" | "merge_parent"（MERGED PR）
   "build_status": "SUCCEEDED",         // "SUCCEEDED"を含めばok表示
   "validation_status": "",             // 任意（lint/DS検証等の要約。"PASSED"/"ERROR 0"でok表示）
   "generated_at": "2026-07-24T16:00:00+09:00",
@@ -294,8 +300,15 @@ web backend は撮影前に対象URLを1回GETし、**`final_url` が要求URL�
 後方互換で読める。OIDが無い manifest もそのまま描画できる（チップが出ないだけ）。`before_oid` が
 無ければ `base_oid` を Before として扱う（`before_oid` 導入前のスキーマ）。
 
-⚠️ **`merge_base` モードでは `base_oid` を表示に使ってはいけない。** 撮ったのは base 先端では
-なく分岐点であり、`base_oid` を出すと「撮っていないコミット」を提示することになる。
+⚠️ **`before_base` が `"merge_base"` のとき、`base_oid` へはフォールバックしない**（`before_oid` →
+`merge_base_oid` の順で解決する）。撮ったのは base 先端ではなく分岐点であり、`base_oid` を出すと
+「撮っていないコミット」を提示することになる。
+
+⚠️ **`Before基準` のチップはOIDの有無と独立に描画する。** OIDが欠けたときに一緒に消えると、
+「今の base に載せた姿ではない」という警告だけが黙って落ちる。
+
+⚠️ **Before を撮っていない回（全画面が新規・Before取得失敗）は `before_oid` も `before_base` も
+記録しない。** 書くと片側撮影が両側成功に見える（`head_oid` だけを記録する）。
 
 ## 5. preflight 契約（preflight_base.py）
 

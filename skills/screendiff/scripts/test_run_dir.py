@@ -71,6 +71,34 @@ class TestRunIsolation(unittest.TestCase):
             self.assertRegex(out['run_id'], r'^\d{8}-\d{6}$')
 
 
+class TestCollisionSafety(unittest.TestCase):
+    """既定run-idは秒精度。同じ秒に2回起動しても前回を上書きしない"""
+
+    def test_same_second_runs_do_not_share_a_directory(self):
+        with tempfile.TemporaryDirectory() as repo:
+            # run-id を指定せず連続実行する（同一秒に入る）
+            dirs = set()
+            for _ in range(3):
+                code, out, _ = _run({"output_dir": "out"}, repo)
+                self.assertEqual(code, 0)
+                dirs.add(out['out_dir'])
+            self.assertEqual(len(dirs), 3, msg=f"ディレクトリが共有された: {dirs}")
+
+    def test_existing_run_id_is_rejected_not_reused(self):
+        """明示run-idの再利用は、固定名ファイルの上書きになるので落とす"""
+        with tempfile.TemporaryDirectory() as repo:
+            code, first, _ = _run({"output_dir": "out"}, repo, '42', '--run-id', 'same')
+            self.assertEqual(code, 0)
+            (Path(first['out_dir']) / 'comparison.html').write_text('前回', encoding='utf-8')
+            code, out, stderr = _run({"output_dir": "out"}, repo, '42', '--run-id', 'same')
+            self.assertEqual(code, 1)
+            self.assertIn('既に', out['error'])
+            self.assertNotIn('Traceback', stderr)
+            # 前回の成果物は無傷
+            self.assertEqual(
+                (Path(first['out_dir']) / 'comparison.html').read_text(encoding='utf-8'), '前回')
+
+
 class TestLatestPointer(unittest.TestCase):
     """添付・共有時の安定参照"""
 
@@ -104,12 +132,25 @@ class TestPathHandling(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertTrue(out['out_dir'].startswith(str(Path(outside).resolve())))
 
-    def test_run_id_with_path_separator_is_rejected(self):
-        """出力先をディレクトリ外へ逃がさない"""
-        with tempfile.TemporaryDirectory() as repo:
-            code, out, stderr = _run({"output_dir": "out"}, repo, '42', '--run-id', '../escape')
-            self.assertEqual(code, 1)
-            self.assertNotIn('Traceback', stderr)
+    def test_unsafe_run_ids_are_rejected(self):
+        """出力先をPRディレクトリ外へ逃がさない。パス区切りだけ見ると "." ".." が通る"""
+        # `--run-id=VALUE` 形式で渡す（`-leading` を argparse がオプションと誤解しないように）
+        for run_id in ('../escape', '..', '.', '', 'a/b', '-leading'):
+            with self.subTest(run_id=repr(run_id)):
+                with tempfile.TemporaryDirectory() as repo:
+                    code, out, stderr = _run({"output_dir": "out"}, repo, '42', f'--run-id={run_id}')
+                    self.assertEqual(code, 1, msg=json.dumps(out, ensure_ascii=False))
+                    self.assertNotIn('Traceback', stderr)
+                    self.assertFalse((Path(repo) / 'out' / '42').exists())  # 作られていない
+
+    def test_unsafe_pr_is_rejected(self):
+        """PR番号もパス要素になる"""
+        for pr in ('../42', '.', 'abc'):
+            with self.subTest(pr=pr):
+                with tempfile.TemporaryDirectory() as repo:
+                    code, out, stderr = _run({"output_dir": "out"}, repo, pr, '--run-id', 'r')
+                    self.assertEqual(code, 1)
+                    self.assertNotIn('Traceback', stderr)
 
     def test_broken_config_is_error(self):
         with tempfile.TemporaryDirectory() as repo:

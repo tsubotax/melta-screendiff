@@ -21,6 +21,13 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_TEMPLATE = SCRIPT_DIR / "template.html"
 
+# Before をどこから撮ったか。"branch_tip"（base先端＝既定の解釈）は自明なので表示しない。
+# それ以外は「見えている Before が何なのか」が変わるため必ず明示する
+BEFORE_BASE_LABEL = {
+    "merge_base": "merge-base（PRの分岐点）",
+    "merge_parent": "マージコミットの親",
+}
+
 # 任意の画面ステータスバッジ。manifest の status がこの辞書に無い場合はバッジを出さない
 STATUS_BADGE_LABEL = {
     "stable": "✅ Stable",
@@ -164,19 +171,29 @@ def render_commit_chip(manifest: dict) -> str:
     before_base が "merge_base" のとき、撮ったのは base ブランチ先端ではなく PR の
     分岐点であり、base_oid を表示すると「撮っていないコミット」を提示することになる。
     """
-    head_oid = manifest.get("head_oid") or ""
-    # 旧schema（before_oid 無し）では base_oid が Before として撮ったコミット
-    before_oid = manifest.get("before_oid") or manifest.get("base_oid") or ""
-    if not (isinstance(before_oid, str) and isinstance(head_oid, str)):
-        return ""
-    if not (before_oid and head_oid):
-        return ""
-    short = f"{html.escape(before_oid[:12])} → {html.escape(head_oid[:12])}"
-    chips = [f'<div class="meta-chip"><span class="k">比較コミット</span><span class="v">{short}</span></div>']
-    if manifest.get("before_base") == "merge_base":
-        # 「今の base に載せたらどう見えるか」ではないことを、HTMLだけ見る人にも伝える
-        chips.append('<div class="meta-chip"><span class="k">Before基準</span>'
-                     '<span class="v">merge-base（PRの分岐点）</span></div>')
+    before_base = manifest.get("before_base")
+    # Before として撮ったコミットを解決する。**モードによって代替候補が変わる**:
+    # merge_base では base_oid は「撮っていないコミット」なので絶対にフォールバックしない
+    # （base_oid へ落ちると、base先端を撮ったかのように表示され成功偽装になる）
+    fallbacks = ("before_oid", "merge_base_oid") if before_base == "merge_base" \
+        else ("before_oid", "base_oid")   # 旧schema（before_oid 無し）は base_oid が Before
+    before_oid = next(
+        (manifest[k] for k in fallbacks
+         if isinstance(manifest.get(k), str) and manifest[k]), "")
+    head_oid = manifest.get("head_oid")
+    head_oid = head_oid if isinstance(head_oid, str) else ""
+
+    chips = []
+    if before_oid and head_oid:
+        short = f"{html.escape(before_oid[:12])} → {html.escape(head_oid[:12])}"
+        chips.append(
+            f'<div class="meta-chip"><span class="k">比較コミット</span><span class="v">{short}</span></div>')
+    # 基準チップは**OIDの有無と独立に**出す。OIDが欠けたときに一緒に消えると、
+    # 「今の base に載せた姿ではない」という警告だけが黙って落ちる
+    label = BEFORE_BASE_LABEL.get(before_base) if isinstance(before_base, str) else None
+    if label:
+        chips.append(f'<div class="meta-chip"><span class="k">Before基準</span>'
+                     f'<span class="v">{html.escape(label)}</span></div>')
     return "\n      ".join(chips)
 
 

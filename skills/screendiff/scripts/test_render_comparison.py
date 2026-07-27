@@ -88,6 +88,40 @@ class TestCommitChip(unittest.TestCase):
                             before_base='merge_base'))
         self.assertIn('merge-base', html)
 
+    def test_merge_base_never_falls_back_to_base_oid(self):
+        """base_oid は「撮っていないコミット」。before_oid 欠落時も表示に使わない"""
+        html = _render(dict(BASE_MANIFEST,
+                            base_oid='aaaaaaaaaaaa1111111111111111111111111111',
+                            merge_base_oid='dddddddddddd4444444444444444444444444444',
+                            head_oid='cccccccccccc3333333333333333333333333333',
+                            before_base='merge_base'))
+        self.assertNotIn('aaaaaaaaaaaa', html)       # base先端を撮ったように見せない
+        self.assertIn('dddddddddddd', html)          # 実際に撮った分岐点を出す
+
+    def test_basis_chip_survives_missing_oids(self):
+        """OIDが無くても「base先端ではない」警告だけは消さない"""
+        html = _render(dict(BASE_MANIFEST, before_base='merge_base'))
+        self.assertNotIn('比較コミット', html)   # OIDチップは出ない
+        self.assertIn('merge-base', html)        # 基準の明示は残る
+
+    def test_merged_pr_basis_is_labeled_separately(self):
+        """MERGED PR の Before はマージコミットの親。merge-base と誤表示しない"""
+        html = _render(dict(BASE_MANIFEST,
+                            before_oid='eeeeeeeeeeee5555555555555555555555555555',
+                            head_oid='cccccccccccc3333333333333333333333333333',
+                            before_base='merge_parent'))
+        self.assertIn('マージコミットの親', html)
+        self.assertNotIn('merge-base', html)
+
+    def test_unknown_before_base_renders_no_basis_chip(self):
+        """未知の値をそのままHTMLへ流さない"""
+        html = _render(dict(BASE_MANIFEST,
+                            before_oid='eeeeeeeeeeee5555555555555555555555555555',
+                            head_oid='cccccccccccc3333333333333333333333333333',
+                            before_base='<script>x</script>'))
+        self.assertIn('比較コミット', html)
+        self.assertNotIn('Before基準', html)
+
     def test_branch_tip_mode_has_no_extra_chip(self):
         html = _render(dict(BASE_MANIFEST,
                             before_oid='bbbbbbbbbbbb2222222222222222222222222222',
