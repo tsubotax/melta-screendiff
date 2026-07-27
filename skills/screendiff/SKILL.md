@@ -430,6 +430,12 @@ python3 "$SCRIPTS/share_plan.py" --config-json "$CONFIG_JSON" \
 1. `comparison.html` の**絶対パス**（`$OUT_DIR/comparison.html`）を提示する。ブラウザで開く手順も添える
 2. Artifactは発行しない。**PRへの書き込み（`gh pr comment` / `gh pr edit`）は一切しない**
 3. 変更画面の要約（Phase 5 で書いた `description`）はチャットに提示してよい。PRやチャットツールへ貼るかどうかはユーザーが手で決める
+4. ユーザーがPRへ手で貼れるよう、1行の定型文も**提示だけ**する（**AIは投稿しない**）:
+
+```
+【Before/After比較（実キャプチャ）】別途共有（比較コミット: <before_oid短縮>...<head_oid短縮>）
+```
+
 ここで終了する。下記のPRコメント下書きには進まない。
 
 ### `effective: "artifact_unavailable"`
