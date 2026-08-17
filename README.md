@@ -99,7 +99,7 @@ Vite は `appType` の既定値が `"spa"` で、**MPA としてビルドして�
 
 依存パッケージのビルド成果物が **gitignore されている**場合、`git checkout` してもファイルは消えない。そこで「成果物が無ければビルドする」型のセットアップスクリプト（`if (existsSync(artifact)) continue;`）を通ると、**After 側でビルドした成果物を Before 側のビルドがそのまま使う**。Before に After のコードが混入し、差分が小さく見える。
 
-実運用の npm workspaces モノレポでこれを踏みかけた。回避するには、**依存 workspace のビルドを serve_command で明示的に走らせる**:
+npm workspaces のモノレポでこれを踏みかけた。回避するには、**依存 workspace のビルドを serve_command で明示的に走らせる**:
 
 ```json
 "serve_command": "npm run build --workspace=packages/tokens && npm run build --workspace=packages/ui && npm run build --workspace=apps/preview && python3 -m http.server 5180 --directory apps/preview/dist"
