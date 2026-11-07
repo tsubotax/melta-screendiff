@@ -340,18 +340,19 @@ class TestServerSafety(Base):
                 import urllib.request
                 urllib.request.urlopen(url, timeout=1)
 
-    def assert_group_gone(self, pgid: int, what: str) -> None:
-        """プロセスグループが消えていること。残っていれば kill してから落とす（陰性対照で漏らさない）"""
+    def assert_groups_gone(self, pgids: dict[str, int]) -> None:
+        """全プロセスグループが消えていること。残っていれば**全部 kill してから**落とす（陰性対照で 1 本も漏らさない）"""
+        import signal
         time.sleep(0.3)
-        alive = True
-        try:
-            os.killpg(pgid, 0)
-        except ProcessLookupError:
-            alive = False
-        if alive:
-            import signal
-            os.killpg(pgid, signal.SIGKILL)
-        self.assertFalse(alive, f"{what}（pgid {pgid}）が残っている")
+        alive = []
+        for what, pgid in pgids.items():
+            try:
+                os.killpg(pgid, 0)
+                alive.append(f"{what}（pgid {pgid}）")
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        self.assertEqual(alive, [], f"配信サーバが残っている: {alive}")
 
     def test_child_server_ignoring_sigterm_is_not_reported_as_stopped(self):
         """親が SIGTERM で先に死んでも、ポートを掴んだ子が残っていれば停止成功にしない（グループ全体を見る）"""
@@ -359,10 +360,10 @@ class TestServerSafety(Base):
         v2 = self.commit("v2")
         cfg = self.config(range={"serve_command": f'cd "$SCREENDIFF_WEB_DIR" && python3 -u {self.stubborn_serve}'})
         code, out = self.run_range(self.v1, v2, cfg)
+        self.assert_groups_gone({f"{side} の子サーバ": out["sides"][side]["server_pgid"] for side in ("before", "after")})
         self.assertEqual(out["run_status"], "compared", out)
         for side in ("before", "after"):
             self.assertTrue(out["sides"][side]["server_stopped"])
-            self.assert_group_gone(out["sides"][side]["server_pgid"], f"{side} の子サーバ")
 
     def test_capture_timeout_stops_server_and_keeps_result_json(self):
         """撮影プロセスが固まっても配信サーバを残さず、out_dir 付きの result.json を書く"""
@@ -378,7 +379,7 @@ class TestServerSafety(Base):
         # ⚠️ URL への GET 失敗では判定しない。親が死ぬと stdout のパイプが切れ、残存サーバは応答できないまま
         # 居座る（ポートを掴んだまま）。プロセスグループの生存を直接見る。
         # 他の assert より先に見て、残っていれば kill してから落とす（陰性対照で毎回 1 本漏らさない）
-        self.assert_group_gone(saved["sides"]["before"]["server_pgid"], "配信サーバ")
+        self.assert_groups_gone({"before の配信サーバ": saved["sides"]["before"]["server_pgid"]})
         self.assertEqual(saved["run_status"], "failed")
         self.assertTrue(saved["sides"]["before"]["server_stopped"])
 
