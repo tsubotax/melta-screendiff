@@ -274,6 +274,79 @@ class TestShippedExamples(unittest.TestCase):
                 self.assertEqual(proc.returncode, 0, msg=proc.stdout)
 
 
+
+RANGE_OK = {
+    "backend": "web",
+    "target_file_patterns": ["^app/"],
+    "web": {"serve_url": "http://127.0.0.1:8146"},
+    "range": {"snapshot_paths": ["app"], "dependency_change_patterns": ["^package\\.json$"],
+              "node_modules_link": "node_modules",
+              "build_command": "cp -R app \"$SCREENDIFF_WEB_DIR\"", "serve_command": "python3 -m http.server 0"},
+    "screens": {"resolver": "expo_router", "expo_router": {"app_dir": "app", "route_prefix": "/",
+                                                            "feature_map": [{"pattern": "^lib/", "screens": ["/home"]}],
+                                                            "representative": ["/home"]}},
+}
+
+
+class TestRangeSection(unittest.TestCase):
+    """範囲モードの設定。symlink で依存を共有するのに一致条件が無い、を確定前に落とす"""
+
+    def test_range_only_config_is_ok_without_web_serve_command(self):
+        code, out = _run_config(RANGE_OK)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out["json"]["range"]["build_command"], "cp -R app \"$SCREENDIFF_WEB_DIR\"")
+        self.assertEqual(out["json"]["range"]["ready_timeout_ms"], 10000)
+        self.assertEqual(out["json"]["screens"]["resolver"], "expo_router")
+
+    def test_defaults_do_not_enable_range(self):
+        code, out = _run_config(WEB_OK)
+        self.assertEqual(code, 0)
+        self.assertIsNone(out["json"]["range"]["build_command"])
+
+    def test_node_modules_link_requires_dependency_patterns(self):
+        cfg = json.loads(json.dumps(RANGE_OK)); cfg["range"]["dependency_change_patterns"] = []
+        code, out = _run_config(cfg)
+        self.assertEqual(code, 1)
+        self.assertTrue(any("dependency_change_patterns" in d for d in out["json"]["details"]))
+
+    def test_build_without_serve_is_error(self):
+        cfg = json.loads(json.dumps(RANGE_OK)); del cfg["range"]["serve_command"]
+        code, out = _run_config(cfg)
+        self.assertEqual(code, 1)
+        self.assertTrue(any("serve_command" in d for d in out["json"]["details"]))
+
+    def test_bad_fixture_shape(self):
+        cfg = json.loads(json.dumps(RANGE_OK)); cfg["range"]["fixtures"] = [{"path": "a.png"}]
+        code, out = _run_config(cfg)
+        self.assertEqual(code, 1)
+
+    def test_expo_router_requires_app_dir(self):
+        cfg = json.loads(json.dumps(RANGE_OK)); cfg["screens"]["expo_router"] = {"route_prefix": "/"}
+        code, out = _run_config(cfg)
+        self.assertEqual(code, 1)
+        self.assertTrue(any("app_dir" in d for d in out["json"]["details"]))
+
+    def test_unknown_builtin_resolver_is_error(self):
+        cfg = json.loads(json.dumps(RANGE_OK)); cfg["screens"]["resolver"] = "next"
+        code, out = _run_config(cfg)
+        self.assertEqual(code, 1)
+
+    def test_route_map_ready_selector_must_be_nonempty(self):
+        cfg = json.loads(json.dumps(WEB_OK))
+        cfg["screens"]["route_map"][0]["ready_selector"] = ""
+        code, out = _run_config(cfg)
+        self.assertEqual(code, 1)
+        self.assertTrue(any("ready_selector" in d for d in out["json"]["details"]))
+
+    def test_non_object_range_does_not_traceback(self):
+        cfg = json.loads(json.dumps(WEB_OK)); cfg["range"] = "yes"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.json"; path.write_text(json.dumps(cfg))
+            proc = subprocess.run([sys.executable, str(SCRIPT), "--config", str(path)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 1)
+        self.assertNotIn("Traceback", proc.stderr)
+
+
 if __name__ == '__main__':
     result = unittest.main(exit=False, verbosity=1).result
     ok = result.wasSuccessful()

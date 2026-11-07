@@ -130,6 +130,45 @@ class TestArtifactMode(unittest.TestCase):
         self.assertIn('トグル', joined)  # 人間の1クリックが要ることを落とさない
 
 
+
+class TestRangeMode(unittest.TestCase):
+    """範囲モード（PR が無い）では share_mode に関わらず PR 書き込みが現れない"""
+
+    def test_range_never_writes_pr(self):
+        for share, no_artifact, author in itertools.product(['artifact', 'local'], [False, True], [False, True]):
+            with self.subTest(share=share, no_artifact=no_artifact, author=author):
+                args = ['--mode', 'range', '--share', share] + (['--no-artifact'] if no_artifact else []) \
+                    + (['--author'] if author else [])
+                code, out, _ = _run({}, *args)
+                self.assertEqual(code, 0)
+                self.assertEqual(out['mode'], 'range')
+                self.assertFalse(out['allow_pr_write'])
+                for marker in ('gh pr comment', 'gh pr edit'):
+                    self.assertIn(marker, out['forbidden'])
+                    self.assertNotIn(marker, ' '.join(out['actions']))
+
+    def test_range_artifact_allows_artifact_only(self):
+        code, out, _ = _run({}, '--mode', 'range', '--share', 'artifact')
+        self.assertEqual(out['effective'], 'range_artifact')
+        self.assertTrue(out['allow_artifact'])
+
+    def test_range_local_is_html_path_only(self):
+        code, out, _ = _run({"share_mode": "local"}, '--mode', 'range')
+        self.assertEqual(out['effective'], 'range_local')
+        self.assertFalse(out['allow_artifact'])
+
+    def test_config_from_stdin(self):
+        proc = subprocess.run([sys.executable, str(SCRIPT), '--config-json', '-', '--mode', 'range'],
+                              input=json.dumps({"share_mode": "local"}), capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout)['effective'], 'range_local')
+
+    def test_pr_mode_default_is_unchanged(self):
+        code, out, _ = _run({})
+        self.assertEqual(out['mode'], 'pr')
+        self.assertTrue(out['allow_pr_write'])
+
+
 if __name__ == '__main__':
     result = unittest.main(exit=False, verbosity=1).result
     ok = result.wasSuccessful()

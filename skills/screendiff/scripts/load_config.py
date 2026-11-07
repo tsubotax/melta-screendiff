@@ -81,10 +81,45 @@ DEFAULTS = {
         # 変更ファイル → 画面の宣言的マッピング。file_pattern は repo-root 相対パスへの正規表現
         # 例: {"file_pattern": "^src/pages/home/", "id": "home", "path": "/", "title": "Home"}
         #     path は web backend では必須（"/" 始まり）。iOS では不要（id が deeplink に入る）
+        #     範囲モードでは任意で ready_selector（表示完了条件の CSS selector）と
+        #     representative（代表画面。変更箇所が写らない可能性を HTML に注記する）を持てる
         "route_map": [],
         # 複雑なリポジトリ向けの逃げ道。変更ファイルパスを引数に取り
         # {"resolved": [...], "unresolved": [...]} を stdout に出すコマンド（docs/contracts.md 参照）
         "resolver_command": None,
+        # 同梱 resolver の選択。"expo_router" は expo-router のファイルパスから
+        # 直接 / 代表 / 未対応を機械判定する（resolvers/expo_router.py、docs/contracts.md §2.1）
+        "resolver": None,
+        "expo_router": None,
+    },
+    # 範囲モード（screendiff_range.py）専用。PR を使わず 2 点（または作業ツリー）を隔離 snapshot から
+    # ビルドして比較する。docs/contracts.md §1.4
+    "range": {
+        # snapshot に入れるパス（git ls-files / git archive の pathspec）
+        "snapshot_paths": [],
+        # 依存ファイル（package.json / lock / patches 等）。Before・After・共有元の 3 者で内容が
+        # 一致しないと撮らない（node_modules を共有元へ symlink するため）
+        "dependency_change_patterns": [],
+        # 共有元の node_modules（repo-root 相対）。snapshot からここへ symlink する。null なら作らない
+        "node_modules_link": None,
+        # capture_browser.mjs が require する playwright（repo-root 相対）
+        "playwright_module": "node_modules/playwright",
+        # ignored だがビルドに要るファイルを固定 bytes から両 snapshot に生成する
+        "fixtures": [],
+        # build / serve に渡す環境変数（.env を読まない・API を固定するなど）
+        "env": {},
+        # snapshot ルートを cwd に実行。$SCREENDIFF_WEB_DIR（side 別の export 先）と $SCREENDIFF_SIDE が入る
+        "build_command": None,
+        "serve_command": None,
+        # serve_command が起動時に URL を出力しない（固定ポート）場合に指定。起動前に応答があれば中断する
+        "serve_url": None,
+        "device_scale_factor": 1,
+        "ready_timeout_ms": 10000,
+        "build_timeout_sec": 600,
+        # 1 画面の撮影プロセスの上限。超えたら run_status=failed（サーバは止める）
+        "capture_timeout_sec": 180,
+        # null なら runner が既定の「API データは固定していない」注記を出す
+        "data_caveat": None,
     },
 }
 
@@ -148,7 +183,7 @@ def validate(config: dict) -> list[str]:
     # セクションの内部検証だけを飛ばし、独立した項目の検証は続ける（1回の実行で
     # 直せるエラーをまとめて出す。早期returnにすると修正→再実行の往復が増える）
     sections = {}
-    for name in ("web", "ios", "screens"):
+    for name in ("web", "ios", "screens", "range"):
         value = config.get(name)
         if isinstance(value, dict):
             sections[name] = value
@@ -206,6 +241,11 @@ def validate(config: dict) -> list[str]:
             except re.error as e:
                 errors.append(
                     f"screens.route_map[{i}].file_pattern の正規表現が不正です: {entry['file_pattern']!r} ({e})")
+            sel = entry.get("ready_selector")
+            if sel is not None and (not isinstance(sel, str) or not sel.strip()):
+                errors.append(f'screens.route_map[{i}] (id="{entry["id"]}") の ready_selector は非空の文字列です')
+            if "representative" in entry and not isinstance(entry["representative"], bool):
+                errors.append(f'screens.route_map[{i}] (id="{entry["id"]}") の representative は true | false です')
             if backend == "web":
                 # ⚠️ path 未指定を許すと resolve_screens.py が空文字を返し、撮影URLが
                 # serve_url そのもの（＝トップページ）になる。エラーも出ないまま
@@ -222,12 +262,83 @@ def validate(config: dict) -> list[str]:
     resolver = screens.get("resolver_command")
     if resolver is not None and not isinstance(resolver, str):
         errors.append(f"screens.resolver_command は文字列です: {type(resolver).__name__}")
-    if not route_map and not resolver:
-        errors.append("screens.route_map か screens.resolver_command のどちらかが必要です")
+    builtin = screens.get("resolver")
+    if builtin is not None and builtin != "expo_router":
+        errors.append(f'screens.resolver は "expo_router" | null です: {builtin!r}')
+    if builtin == "expo_router":
+        er = screens.get("expo_router")
+        if not isinstance(er, dict):
+            errors.append("screens.expo_router はオブジェクトです（resolver が expo_router のとき必須）")
+        else:
+            if not isinstance(er.get("app_dir"), str) or not er["app_dir"].strip():
+                errors.append("screens.expo_router.app_dir は非空の文字列です")
+            if "route_prefix" in er and not isinstance(er["route_prefix"], str):
+                errors.append("screens.expo_router.route_prefix は文字列です")
+            fm = er.get("feature_map", [])
+            if not isinstance(fm, list):
+                errors.append("screens.expo_router.feature_map は配列です")
+            else:
+                for i, entry in enumerate(fm):
+                    if (not isinstance(entry, dict) or not isinstance(entry.get("pattern"), str)
+                            or not isinstance(entry.get("screens"), list) or not entry["screens"]
+                            or not all(isinstance(s, str) and s.startswith("/") for s in entry["screens"])):
+                        errors.append(f"screens.expo_router.feature_map[{i}] は {{pattern, screens[\"/...\"]}} です")
+                        continue
+                    try:
+                        re.compile(entry["pattern"])
+                    except re.error as e:
+                        errors.append(f"screens.expo_router.feature_map[{i}].pattern の正規表現が不正です ({e})")
+            rep = er.get("representative", [])
+            if not isinstance(rep, list) or not all(isinstance(s, str) and s.startswith("/") for s in rep):
+                errors.append('screens.expo_router.representative は "/" 始まりの文字列の配列です')
+            for key in ("titles", "ready_selectors", "fixed_params"):
+                if key in er and not isinstance(er[key], dict):
+                    errors.append(f"screens.expo_router.{key} はオブジェクトです")
+    if not route_map and not resolver and not builtin:
+        errors.append("screens.route_map か screens.resolver_command のどちらかが必要です"
+                      "（同梱 resolver を使うなら screens.resolver）")
+    rng = sections["range"]
+    range_configured = bool(rng.get("build_command") or rng.get("serve_command"))
+    if range_configured:
+        for key in ("build_command", "serve_command"):
+            if not isinstance(rng.get(key), str) or not rng[key].strip():
+                errors.append(f"range.{key} は非空の文字列です（範囲モードでは両方必要）")
+        sp = rng.get("snapshot_paths")
+        if not isinstance(sp, list) or not sp or not all(isinstance(p, str) and p for p in sp):
+            errors.append("range.snapshot_paths は非空の文字列の配列です")
+        dp = rng.get("dependency_change_patterns", [])
+        if not isinstance(dp, list) or not all(isinstance(p, str) for p in dp):
+            errors.append("range.dependency_change_patterns は文字列の配列です")
+        else:
+            for i, p in enumerate(dp):
+                try:
+                    re.compile(p)
+                except re.error as e:
+                    errors.append(f"range.dependency_change_patterns[{i}] の正規表現が不正です ({e})")
+        if rng.get("node_modules_link") is not None and not isinstance(rng["node_modules_link"], str):
+            errors.append("range.node_modules_link は文字列か null です")
+        if rng.get("node_modules_link") and not dp:
+            # symlink で依存を共有するのに一致条件が無いと、両側が別の依存でビルドされても気づけない
+            errors.append("range.node_modules_link を使うなら range.dependency_change_patterns が必要です")
+        fx = rng.get("fixtures", [])
+        if not isinstance(fx, list) or not all(isinstance(f, dict) and isinstance(f.get("path"), str)
+                                                and isinstance(f.get("base64"), str) for f in fx):
+            errors.append("range.fixtures は {path, base64} の配列です")
+        env = rng.get("env", {})
+        if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
+            errors.append("range.env は文字列→文字列のオブジェクトです")
+        if rng.get("serve_url") is not None:
+            errors.extend(f"range.{e[4:]}" if e.startswith("web.") else e for e in validate_serve_url(rng["serve_url"]))
+        for key in ("ready_timeout_ms", "build_timeout_sec"):
+            if not isinstance(rng.get(key), int) or rng[key] <= 0:
+                errors.append(f"range.{key} は正の整数です")
+        if not isinstance(rng.get("device_scale_factor"), (int, float)) or rng["device_scale_factor"] <= 0:
+            errors.append("range.device_scale_factor は正の数です")
     if backend == "web":
         web = sections["web"]
         if not web.get("serve_command"):
-            errors.append("web.serve_command が必要です")
+            if not range_configured:
+                errors.append("web.serve_command が必要です（範囲モードだけ使うなら range.serve_command）")
         elif not isinstance(web["serve_command"], str):
             errors.append(f"web.serve_command は文字列です: {type(web['serve_command']).__name__}")
         errors.extend(validate_serve_url(web.get("serve_url")))

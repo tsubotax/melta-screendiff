@@ -10,11 +10,15 @@ SKILL.md（オーケストレーション層 / AIが読む手順書）
         ├── resolve_screens.py   変更ファイル → 画面解決（route_map）
         ├── validate_resolved.py resolver出力の契約検証（撮影前ゲート）
         ├── preflight_base.py    base先行チェック（撮影前ゲート・OPEN PRのみ）
-        ├── share_plan.py        共有モード解決 → 許可/禁止アクション確定
+        ├── share_plan.py        共有モード解決 → 許可/禁止アクション確定（--mode range で PR 書き込み禁止）
         ├── render_comparison.py manifest.json → base64埋め込み比較HTML
         ├── run_cleanup.py       cleanup_command の実行（Cleanupフェーズ）
+        ├── screendiff_range.py  範囲モード（PR 不要）。2 点 / 作業ツリーを隔離 snapshot から比較する 1 コマンド runner
+        ├── resolvers/
+        │   └── expo_router.py   expo-router のパスから 直接 / 代表 / 未対応 を機械判定する resolver
         └── backends/
-            ├── web/capture.py   Playwright/Chrome フルページ撮影
+            ├── web/capture.py   Playwright/Chrome フルページ撮影（PR モード）
+            ├── web/capture_browser.mjs  範囲モードの撮影。同じページで pathname / ready_selector を検査
             └── ios/…            simctl + sim-use ページング撮影・AXチェック
 ```
 
@@ -191,6 +195,58 @@ dev / preview は `appType` 既定 `"spa"`、Next.js 等も同様）を指定す
 200 とルートの `index.html` が返り、撮影対象がズレても検知できない。ビルド成果物を素の静的
 サーバーで配信すると 404 になり capture が中断する（README の「serve_command の罠」参照）。
 
+### 1.5 range（範囲モード・screendiff_range.py）
+
+PR を使わず 2 点（または作業ツリー）を比較するときの設定。PR モードの `web.serve_command` とは独立で、
+**snapshot ルートを cwd** に実行される。`$SCREENDIFF_WEB_DIR`（side 別の export 先）と `$SCREENDIFF_SIDE`
+（`before` / `after`）が環境変数で入る。
+
+```jsonc
+"range": {
+  "snapshot_paths": ["mobile", "design/serve.mjs"],           // git ls-files / git archive の pathspec
+  "dependency_change_patterns": ["^mobile/(package\\.json|package-lock\\.json|patches/)"],
+  "node_modules_link": "mobile/node_modules",                  // snapshot からここへ symlink。使うなら上の patterns が必須
+  "playwright_module": "mobile/node_modules/playwright",       // capture_browser.mjs が require する
+  "fixtures": [{"path": "mobile/assets/mock-photos/done-ui.png", "base64": "..."}],  // ignored だがビルドに要るもの
+  "env": {"EXPO_NO_DOTENV": "1", "CI": "1", "EXPO_PUBLIC_API_URL": ""},
+  "build_command": "cd mobile && node node_modules/expo/bin/cli export --platform web --clear --output-dir \"$SCREENDIFF_WEB_DIR\"",
+  "serve_command": "node design/serve.mjs --dir \"$SCREENDIFF_WEB_DIR\" --port 0",   // 起動時に URL を出力する、か serve_url を指定
+  "serve_url": null,                 // 固定ポートのとき。起動前に応答があれば中断（残存サーバを撮らない）
+  "device_scale_factor": 3, "ready_timeout_ms": 10000, "build_timeout_sec": 600,
+  "capture_timeout_sec": 180,        // 1 画面の撮影プロセスの上限。超えたら failed（配信サーバは止める）
+  "data_caveat": null                // null なら既定の「API データは固定していない」注記を HTML に出す
+}
+```
+
+runner の不変条件（screendiff_range.py）:
+
+- `--before` / `--after` は最初に commit OID へ固定し、以後の diff・依存検査・snapshot はその OID だけを使う。
+  ビルド中に別ターミナルで commit / fetch されても After の中身は `head_oid` と一致する
+- 依存ファイル（`dependency_change_patterns`）は **`snapshot_paths` と独立にリポ全体から**探す。`node_modules_link` を
+  使う設定でパターンが 3 者とも 0 件なら設定ミスとして `failed`（一致扱いで素通りさせない）
+- `target_file_patterns` に当たる変更があるのに撮れる画面が 0（動的ルートだけ・route_map 不一致だけ）のときは
+  `no_ui_change` でなく **`failed`**。`unsupported` / `unresolved` を result に残す（未確認を「変更なし」で消さない）
+- 作業ツリー snapshot の `inputs_sha256` は**コピーした実体**から取る（コピー元を読み直すと保存のタイミングで取り違える）
+- fixture の書き込み先は snapshot の内側に限る（絶対パス・`..`・共有 `node_modules` の symlink 経由は `failed`）
+- 配信サーバは例外・Ctrl-C・撮影タイムアウトでも止める。途中で落ちた回も `out_dir/result.json` に `sides[].serve_url` と
+  理由が残る
+- `capture_browser.mjs` の exit 1（`stage` が `load` / `launch`）だけを `skipped_runner_unavailable` に分類する。
+  `stage: "page"`（goto タイムアウト・保存失敗）は当該画面の `compare_status: unresolvable`
+- Before を 1 枚も撮れていない回（全画面が新規）は manifest に `before_oid` / `before_base` を書かない（§4）
+
+⚠️ **隔離の保証範囲**: snapshot の `node_modules` は作業ツリーへの**書き込み可能な symlink**なので、`build_command`
+が `node_modules/.cache` 等へ書くことまでは止めない。runner が保証するのは「作業ツリーの追跡ファイルと `.git` に
+触らない」ことで、共有 `node_modules` の無変更ではない。
+
+load_config.py は `build_command` / `serve_command` のどちらかがあれば範囲モードの設定として検証する
+（両方必須、`snapshot_paths` 非空、`node_modules_link` を使うなら `dependency_change_patterns` 必須、
+`fixtures` は `{path, base64}`）。範囲モードだけ使うリポジトリでは `web.serve_command` を省略できる。
+
+runner の出力（stdout, JSON）は `run_status`（`compared` / `no_ui_change` / `skipped_dependency_change` /
+`skipped_runner_unavailable` / `failed`）を持ち、`failed` だけ exit 1。**どの値でも通常の push を止めない**
+のが呼び出し元（SKILL.md / codex/screendiff/SKILL.md）の契約。出力先は `output_dir/range/<時刻>/`
+（side ごとに `input/` `web/` `shots/`、`manifest.json`、`comparison.html`、`result.json`）。
+
 ## 2. resolver 契約（resolve_screens.py / resolver_command）
 
 入力: 変更ファイルの repo-root 相対パス群（引数）。出力（stdout, JSON）:
@@ -221,6 +277,53 @@ dev / preview は `appType` 既定 `"spa"`、Next.js 等も同様）を指定す
 別経路なので、**`validate_resolved.py` を必ず通す**（SKILL.md の Phase 2 で規定）。空 path を
 通すと撮影URLが `serve_url` そのもの＝トップページになり、200が返り title も取れ、Before/After が
 一致して「差分なし」と誤結論する——route_map で潰したのと同型の事故が adapter 経路で再開通する。
+
+### 2.1 同梱 resolver: expo_router（resolvers/expo_router.py）
+
+`screens.resolver: "expo_router"` と `screens.expo_router` で、expo-router の**ファイルパスから撮る画面を機械的に決める**。
+手書きの正規表現は持たない（設計レビューで 3 周連続、`(tabs)/search/` 配下の子画面 9 本を親の検索トップへ
+直接解決する誤りが残った。子画面の変更を親画面の「差分なし」で確認済みにする事故を、分類を機械に任せて塞ぐ）。
+
+```jsonc
+"screens": {
+  "resolver": "expo_router",
+  "expo_router": {
+    "app_dir": "mobile/src/app",          // expo-router の app ディレクトリ（repo-root 相対）
+    "route_prefix": "/melta",             // ここに当たらないルートは unsupported（旧ルート・lab 等）
+    "feature_map": [{"pattern": "^mobile/src/melta/(workshop|completion)/", "screens": ["/melta/workshop"]}],
+    "representative": ["/melta/home"],    // feature_map に当たらない変更の代表画面
+    "titles": {"/melta/home": "ホーム"},
+    "ready_selectors": {"/melta/home": "[data-testid=screen-home-ready]"},   // 任意
+    "fixed_params": {"/melta/search/project/[id]": {"id": "demo-1"}}         // 任意。動的ルートを direct に昇格
+  }
+}
+```
+
+| 変更ファイル | 分類 | 撮る画面 |
+|---|---|---|
+| `app_dir` 配下の静的ルート（`route_prefix` 一致） | direct | そのルート |
+| 動的セグメント（`[id]`）あり | unsupported（`fixed_params` に値があれば direct） | — |
+| `_layout` | representative | その階層直下の静的ルート（無ければ `representative` 既定） |
+| `+html` / `+not-found` / `route_prefix` の外 | unsupported | — |
+| `app_dir` 外で `feature_map` に当たる | representative | 指定の画面 |
+| それ以外 | representative | `representative` 既定 |
+
+出力は §2 の契約に次を足す（`validate_resolved.py` は追加キーを素通しする）:
+
+```jsonc
+{"resolved": [{"screen_id": "melta-home", "title": "ホーム", "path": "/melta/home",
+               "source_file": "...", "source_files": ["..."],
+               "representative": true,      // 全部が代表扱い（変更箇所が写らない可能性）
+               "also_direct": false,        // 直接と代表が混ざった
+               "ready_selector": "[data-testid=...]"}],
+ "unresolved": [],
+ "unsupported": [{"source_file": "...", "route": "/melta/search/project/[id]", "reason": "動的セグメント..."}],
+ "static_routes": ["/melta/home", "..."]}
+```
+
+同一画面に複数の変更が当たったときの集約: `representative` は**全部が代表のときだけ true**、混ざれば
+`also_direct: true`（入力順で注記を落とさない）。`route_map` 版（resolve_screens.py）も同じ集約をし、
+エントリの `representative` / `ready_selector` を引き継ぐ。
 
 ## 3. capture 契約（backends/*/capture系）
 
@@ -315,6 +418,29 @@ web backend は撮影前に対象URLを1回GETし、**`final_url` が要求URL�
 
 ⚠️ **Before を撮っていない回（全画面が新規・Before取得失敗）は `before_oid` も `before_base` も
 記録しない。** 書くと片側撮影が両側成功に見える（`head_oid` だけを記録する）。
+
+### 4.1 範囲モードの追加キー
+
+```jsonc
+{
+  "mode": "range", "before_base": "range",     // ヘッダに「範囲比較」と出す。PR の文言は出ない
+  "base_ref": "origin/main", "head_ref": "HEAD" | "worktree",
+  "after_source": "ref" | "worktree",          // worktree なら「push 対象の commit と対応しない」注記
+  "before_oid": "...", "head_oid": "...",      // After は従来どおり head_oid（after_oid は作らない）
+  "inputs_changed_during_capture": false,      // true なら赤い注記（撮り直し）
+  "inputs_sha256": {"before": "...", "after": "..."},
+  "unsupported": [...],                        // resolver の unsupported をそのまま。HTML に一覧で出す
+  "data_caveat": "...",
+  "screens": [{...,
+    "compare_status": "compared" | "new" | "removed" | "unresolvable",   // 既存の status（stable 等）と別キー
+    "compare_reason": "After: 遷移先が /login（期待 /about）",
+    "representative": true, "also_direct": false, "source_files": [...]}]
+}
+```
+
+`kind` は従来どおり描画用（`unresolvable` は `changed` のまま、バッジと注記で「比較不能」を出す）。
+`compare_status` / `representative` / `inputs_changed_during_capture` / `unsupported` の注記は
+**成功偽装を防ぐためのもの**で、render は黙って落とさない（test_render_comparison.py で固定）。
 
 ## 5. preflight 契約（preflight_base.py）
 

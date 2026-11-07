@@ -1,7 +1,7 @@
 {
   "name": "screendiff",
-  "version": "0.1.0",
-  "description": "UI変更PRを Before/After の実キャプチャで視覚比較する plugin。base/PRブランチを各々ビルド・撮影し、比較HTMLを生成する",
+  "version": "0.2.0",
+  "description": "UI変更を Before/After の実キャプチャで視覚比較する plugin。PR モード（base/PRブランチを各々ビルド・撮影）と、PR を使わず 2 点や作業ツリーを隔離 snapshot から比較する範囲モードを持つ",
   "author": {
     "name": "tsubotax",
     "url": "https://github.com/tsubotax"

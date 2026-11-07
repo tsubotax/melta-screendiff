@@ -15,6 +15,8 @@ TESTS=(
   test_share_plan.py
   test_preflight_base.py
   test_render_comparison.py
+  test_expo_router_resolver.py
+  test_screendiff_range.py
   backends/web/test_capture.py
   backends/ios/test_ax_dup_check.py
 )

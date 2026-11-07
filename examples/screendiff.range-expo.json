@@ -1,0 +1,55 @@
+{
+  "backend": "web",
+  "target_file_patterns": [
+    "^mobile/src/(app/melta|melta|components|theme)/",
+    "^mobile/assets/",
+    "^design/(tokens|rules)\\.json$",
+    "^mobile/(package\\.json|package-lock\\.json|patches/|app\\.json|metro\\.config\\.js)"
+  ],
+  "output_dir": ".team/screendiff",
+  "share_mode": "local",
+  "web": {
+    "serve_command": "（PR モード用。範囲モードだけ使うなら range.serve_command を書く）",
+    "serve_url": "http://127.0.0.1:8146",
+    "viewport": "393x852",
+    "full_page": true,
+    "settle_ms": 1500
+  },
+  "range": {
+    "snapshot_paths": ["mobile", "design/serve.mjs"],
+    "dependency_change_patterns": ["^mobile/(package\\.json|package-lock\\.json|patches/)"],
+    "node_modules_link": "mobile/node_modules",
+    "playwright_module": "mobile/node_modules/playwright",
+    "fixtures": [
+      { "path": "mobile/assets/mock-photos/done-ui.png", "base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=" },
+      { "path": "mobile/assets/mock-photos/box-ui.png", "base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=" },
+      { "path": "mobile/assets/mock-photos/log-ui.png", "base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=" }
+    ],
+    "env": { "EXPO_NO_DOTENV": "1", "CI": "1", "EXPO_NO_TELEMETRY": "1", "EXPO_PUBLIC_API_URL": "" },
+    "build_command": "cd mobile && node node_modules/expo/bin/cli export --platform web --clear --output-dir \"$SCREENDIFF_WEB_DIR\"",
+    "serve_command": "node design/serve.mjs --dir \"$SCREENDIFF_WEB_DIR\" --port 0",
+    "device_scale_factor": 3,
+    "ready_timeout_ms": 10000
+  },
+  "screens": {
+    "resolver": "expo_router",
+    "expo_router": {
+      "app_dir": "mobile/src/app",
+      "route_prefix": "/melta",
+      "feature_map": [
+        { "pattern": "^mobile/src/melta/(home|feed|timeline)/", "screens": ["/melta/home"] },
+        { "pattern": "^mobile/src/melta/(workshop|completion|inventory)/", "screens": ["/melta/workshop"] },
+        { "pattern": "^mobile/src/melta/(kit-search|search)/", "screens": ["/melta/search"] },
+        { "pattern": "^mobile/src/melta/notifications/", "screens": ["/melta/notifications"] },
+        { "pattern": "^mobile/src/melta/(settings|profile)/", "screens": ["/melta/settings"] }
+      ],
+      "representative": ["/melta/home"],
+      "titles": {
+        "/melta/home": "ホーム", "/melta/workshop": "工房", "/melta/search": "検索",
+        "/melta/notifications": "通知", "/melta/settings": "設定"
+      },
+      "ready_selectors": {},
+      "fixed_params": {}
+    }
+  }
+}

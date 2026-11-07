@@ -17,6 +17,37 @@ SCRIPTS="${CLAUDE_PLUGIN_ROOT}/skills/screendiff/scripts"
 PR=<引数のPR番号>   # 例: /screendiff:screendiff 42 → PR=42
 ```
 
+### 範囲モード（PR が無いとき）
+
+PR 番号の代わりに `--range A..B`（または `--range A --after worktree`）が渡されたら、**以降の Phase 0〜7 を辿らず**、1 コマンドで完走する runner に任せる（PR モードの checkout の往復・HEAD 一致ゲートは使わない。両側とも隔離 snapshot からビルドする）:
+
+```bash
+REPO_ROOT=$(git rev-parse --show-toplevel)
+RANGE_JSON=$(mktemp -t screendiff-range)
+python3 "$SCRIPTS/screendiff_range.py" --repo-root "$REPO_ROOT" --before <A> --after <B|worktree> [--share local|artifact] \
+  > "$RANGE_JSON"; cat "$RANGE_JSON"
+```
+
+stdout JSON の `run_status` で分岐する。**どの値でも通常の push を止めない**:
+
+| run_status | 報告 |
+|---|---|
+| `compared` | `comparison_html` を Read で目視し、画面ごとに 1〜3 行で差分を要約する |
+| `no_ui_change` | 「UI 変更なし（対象ファイル 0 件）」1 行で終わる |
+| `skipped_dependency_change` | 「依存変更のため比較対象外」1 行。撮影成功に数えない |
+| `skipped_runner_unavailable` | sandbox の外（通常の Terminal / cmux の自分のペイン）からの再実行を案内する |
+| `failed` | `reason` と `out_dir` のログを提示する。`unsupported[]` / `unresolved[]` があれば「未対応: <ファイル>（Simulator 等で確認）」を併記する（対象ファイルはあるのに撮れる画面が 0 のときはこの形で failed になる。「変更なし」と書かない） |
+
+`compared` の要約で**必ず落とさない注記**（落とすと成功偽装になる）:
+
+- `compare_status: unresolvable` の画面 → 「比較不能（compare_reason）」。差分なしと書かない
+- `representative: true` の画面 → 「代表画面のみ。変更箇所が写っていない可能性」
+- `unsupported[]` → 「未対応: <ファイル>（Simulator 等で別途確認）」
+- `inputs_changed_during_capture: true` → 「撮影中に作業ツリーが変わった。撮り直し」
+- データ変動の注記（API を固定していない）
+
+共有は `share_plan`（runner が `--mode range` で確定済み。結果の `share_plan` を見る）に従う。**PR への書き込みは範囲モードでは常に forbidden**。`artifact` なら Artifact を発行して URL を提示し、どこへ貼るかは人間が決める。設定は `range` 節（docs/contracts.md §1.5、`examples/screendiff.range-expo.json`）。
+
 ### 共有モード（`SHARE_MODE`）
 
 比較結果をどう配布するかを最初に確定する。**Phase 7 の分岐に直結し、PRへ書き込むかどうかが変わる**ため、撮影を始める前に決めておく:

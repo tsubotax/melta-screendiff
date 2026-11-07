@@ -1,4 +1,4 @@
-<title>PR#{{PR_NUMBER}} Before/After — {{PR_TITLE}}</title>
+<title>Before/After — {{HEADING}}</title>
 <style>
   :root {
     --bg: #f6f5f2;
@@ -128,6 +128,15 @@
   .badge.new { background: #e3f6ea; color: var(--new); }
   .badge.removed { background: #fbe4e1; color: var(--bad); }
   .badge.lint-ng { background: #fbe4e1; color: var(--bad); }
+  .badge.unresolvable { background: #fbe4e1; color: var(--bad); }
+  .badge.representative { background: #fff3d6; color: #a3730b; }
+
+  /* 範囲モードの実行全体への注記（作業ツリー比較・撮影中の入力変化・未対応・データ変動） */
+  .notices { margin: 14px 0 18px; display: grid; gap: 8px; }
+  .notice { padding: 10px 14px; border-radius: 8px; font-size: 13px; line-height: 1.6; background: #fff3d6; color: #6a4a00; }
+  .notice.bad { background: #fbe4e1; color: #7a1f16; }
+  .notice.info { background: #eef1f6; color: #3c4250; }
+  .notice code { font-size: 12px; }
   .screen-id {
     font-family: var(--mono);
     font-size: 12px;
@@ -214,11 +223,8 @@
 <div class="wrap">
   <header>
     <div class="eyebrow">melta-screendiff</div>
-    <h1>PR #{{PR_NUMBER}} — {{PR_TITLE}}</h1>
-    <div class="sub">
-      <code>{{BASE_REF}}</code>（Before）と <code>{{HEAD_REF}}</code>（After, このPR）を同一環境でビルド・目視比較。
-      <a href="{{PR_URL}}">{{PR_URL}}</a>
-    </div>
+    <h1>{{HEADING}}</h1>
+    <div class="sub">{{SUBHEADING}}</div>
     <div class="meta-row">
       <div class="meta-chip"><span class="k">Afterビルド</span><span class="v {{BUILD_STATUS_CLASS}}">{{BUILD_STATUS}}</span></div>
       <div class="meta-chip"><span class="k">検証</span><span class="v {{VALIDATION_STATUS_CLASS}}">{{VALIDATION_STATUS}}</span></div>
@@ -227,6 +233,8 @@
       {{COMMIT_CHIP}}
     </div>
   </header>
+
+  {{NOTICES}}
 
   <div class="toc">
     {{TOC_LINKS}}
