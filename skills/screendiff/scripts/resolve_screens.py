@@ -63,7 +63,7 @@ def main() -> int:
 
     resolved = []
     unresolved = []
-    seen = set()
+    by_id = {}
     for rel_path in args.changed_files:
         hits = [entry for pattern, entry in compiled if pattern.search(rel_path)]
         if not hits:
@@ -71,16 +71,29 @@ def main() -> int:
             continue
         for entry in hits:
             key = entry["id"]
-            item = {
-                "screen_id": entry["id"],
-                "title": entry.get("title", entry["id"]),
-                "path": entry.get("path", ""),
-                "source_file": rel_path,
-            }
-            if key in seen:
-                continue  # 同一画面が複数ファイルから解決されても1回だけ
-            seen.add(key)
-            resolved.append(item)
+            item = by_id.get(key)
+            if item is None:
+                # 同一画面が複数ファイルから解決されても出力は1件。ただし代表画面の注記は
+                # 入力順で落とさない（下で集約する）
+                item = {
+                    "screen_id": entry["id"],
+                    "title": entry.get("title", entry["id"]),
+                    "path": entry.get("path", ""),
+                    "source_file": rel_path,
+                    "source_files": [],
+                    "_reps": [],
+                }
+                by_id[key] = item
+                resolved.append(item)
+            item["source_files"].append(rel_path)
+            item["_reps"].append(bool(entry.get("representative", False)))
+            if entry.get("ready_selector") and "ready_selector" not in item:
+                item["ready_selector"] = entry["ready_selector"]
+    for item in resolved:
+        reps = item.pop("_reps")
+        # 全部が代表扱いのときだけ representative。直接と代表が混ざれば also_direct で両方残す
+        item["representative"] = all(reps)
+        item["also_direct"] = any(reps) and not all(reps)
 
     print(json.dumps({"resolved": resolved, "unresolved": unresolved}, ensure_ascii=False, indent=2))
     return 0

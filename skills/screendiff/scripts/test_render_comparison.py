@@ -160,6 +160,60 @@ class TestEscaping(unittest.TestCase):
         self.assertIn('&lt;script&gt;', html)
 
 
+
+RANGE_MANIFEST = {
+    "mode": "range", "base_ref": "origin/main", "head_ref": "worktree", "after_source": "worktree",
+    "before_oid": "aaaaaaaaaaaa1111111111111111111111111111", "head_oid": "cccccccccccc3333333333333333333333333333",
+    "before_base": "range", "build_status": "SUCCEEDED", "generated_at": "2026-11-07T23:00:00+09:00",
+    "inputs_changed_during_capture": False,
+    "unsupported": [{"source_file": "app/search/project/[id].tsx", "route": "/search/project/[id]", "reason": "動的セグメント"}],
+    "data_caveat": "API データは固定していない",
+    "screens": [
+        {"screen_id": "home", "title": "ホーム", "kind": "changed", "compare_status": "compared",
+         "representative": True, "source_files": ["lib/button.tsx"], "before_paths": [], "after_paths": []},
+        {"screen_id": "about", "title": "About", "kind": "changed", "compare_status": "unresolvable",
+         "compare_reason": "After: 遷移先が /login（期待 /about）", "before_paths": [], "after_paths": []},
+    ],
+}
+
+
+class TestRangeMode(unittest.TestCase):
+    """範囲モードの注記は成功偽装を防ぐためのもの。黙って落ちないことを固定する"""
+
+    def test_heading_and_worktree_notice(self):
+        html = _render(RANGE_MANIFEST)
+        self.assertIn("範囲比較", html)
+        self.assertNotIn("PR #", html)
+        self.assertIn("作業ツリー", html)
+        self.assertIn("cccccccccccc", html)
+        self.assertNotIn("{{", html)
+
+    def test_inputs_changed_is_loud(self):
+        html = _render(dict(RANGE_MANIFEST, inputs_changed_during_capture=True))
+        self.assertIn("撮影中に入力が変わった", html)
+        self.assertIn("notice bad", html)
+
+    def test_unsupported_and_caveat_listed(self):
+        html = _render(RANGE_MANIFEST)
+        self.assertIn("未対応", html)
+        self.assertIn("project/[id]", html)
+        self.assertIn("API データは固定していない", html)
+
+    def test_representative_and_unresolvable_notes(self):
+        html = _render(RANGE_MANIFEST)
+        self.assertIn("代表画面", html)
+        self.assertIn("lib/button.tsx", html)
+        self.assertIn("比較不能", html)
+        self.assertIn("/login", html)
+
+    def test_pr_mode_heading_unchanged(self):
+        html = _render(BASE_MANIFEST)
+        self.assertIn("PR #42", html)
+        self.assertIn("https://github.com/example/app/pull/42", html)
+        self.assertNotIn("範囲比較", html)
+        self.assertNotIn("{{", html)
+
+
 if __name__ == '__main__':
     result = unittest.main(exit=False, verbosity=1).result
     ok = result.wasSuccessful()

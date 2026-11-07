@@ -26,6 +26,12 @@ DEFAULT_TEMPLATE = SCRIPT_DIR / "template.html"
 BEFORE_BASE_LABEL = {
     "merge_base": "merge-base（PRの分岐点）",
     "merge_parent": "マージコミットの親",
+    "range": "範囲比較（指定した 2 点）",
+}
+
+# 範囲モードの画面ごとの比較状態。"compared" は自明なのでバッジを出さない
+COMPARE_STATUS_BADGE = {
+    "unresolvable": "⛔ 比較不能",
 }
 
 # 任意の画面ステータスバッジ。manifest の status がこの辞書に無い場合はバッジを出さない
@@ -105,6 +111,11 @@ def render_screen_card(screen: dict) -> str:
         badges.append('<span class="badge removed">🗑 削除された画面</span>')
     if lint_ng:
         badges.append(f'<span class="badge lint-ng">LINT ERROR {lint_error_count(screen)}</span>')
+    compare_status = screen.get("compare_status")
+    if compare_status in COMPARE_STATUS_BADGE:
+        badges.append(f'<span class="badge unresolvable">{COMPARE_STATUS_BADGE[compare_status]}</span>')
+    if screen.get("representative") is True:
+        badges.append('<span class="badge representative">代表画面</span>')
 
     before_paths = capture_paths(screen, "before")
     after_paths = capture_paths(screen, "after")
@@ -131,6 +142,21 @@ def render_screen_card(screen: dict) -> str:
           </div>'''
 
     notes = []
+    # 範囲モード: 成功偽装しない。比較不能の理由と、代表画面の限界を画面の直下に出す
+    if compare_status == "unresolvable":
+        reason = html.escape(screen.get("compare_reason") or "pathname / 表示完了条件が成立しない")
+        notes.append(f"⛔ この画面は比較できていない: {reason}。「差分なし」とは読まない")
+    if screen.get("representative") is True:
+        srcs = ", ".join(html.escape(str(s)) for s in (screen.get("source_files") or [])[:6])
+        more = "" if len(screen.get("source_files") or []) <= 6 else " ほか"
+        notes.append("⚠️ 代表画面のみ。変更箇所がこの画面に写っていない可能性がある"
+                     + (f"（変更: <code>{srcs}</code>{more}）" if srcs else "")
+                     + "。「差分なし」を変更全体に一般化しない")
+    elif screen.get("also_direct") is True:
+        notes.append("ℹ️ この画面自身の変更に加え、共通部品の変更も含む（共通部品の影響は他の画面に及びうる）")
+    for side, label in (("before", "Before"), ("after", "After")):
+        if screen.get(f"{side}_ready") == "none" and screen.get("compare_status") in ("compared", None) and screen.get("mode_range_hint"):
+            notes.append(f"ℹ️ {label} は表示完了条件なしで撮影")
     if kind == "changed" and before_paths and after_paths and len(before_paths) != len(after_paths):
         notes.append(
             f"ℹ️ ページ数が Before {len(before_paths)} / After {len(after_paths)} で異なる"
@@ -197,9 +223,56 @@ def render_commit_chip(manifest: dict) -> str:
     return "\n      ".join(chips)
 
 
+def render_heading(manifest: dict) -> tuple[str, str]:
+    """見出しと副題。PR モードは従来どおり、範囲モードは 2 点の比較であることを明示する。"""
+    if manifest.get("mode") == "range":
+        before = html.escape(str(manifest.get("base_ref", "")))
+        after = html.escape(str(manifest.get("head_ref", "")))
+        heading = f"範囲比較 {before} → {after}"
+        after_label = "After, 作業ツリー" if manifest.get("after_source") == "worktree" else "After"
+        sub = (f"<code>{before}</code>（Before）と <code>{after}</code>（{after_label}）を"
+               "隔離 snapshot から同一環境でビルド・目視比較。PR は無い")
+        return heading, sub
+    heading = f"PR #{html.escape(str(manifest.get('pr_number', '')))} — {html.escape(manifest.get('pr_title', ''))}"
+    url = html.escape(manifest.get("pr_url", ""))
+    sub = (f"<code>{html.escape(manifest.get('base_ref', ''))}</code>（Before）と "
+           f"<code>{html.escape(manifest.get('head_ref', ''))}</code>（After, このPR）を同一環境でビルド・目視比較。\n"
+           f'      <a href="{url}">{url}</a>')
+    return heading, sub
+
+
+def render_notices(manifest: dict) -> str:
+    """実行全体への注記（範囲モード）。黙って落とすと成功偽装になるものだけを出す。"""
+    if manifest.get("mode") != "range":
+        return ""
+    items = []
+    if manifest.get("after_source") == "worktree":
+        base = manifest.get("head_oid") or ""
+        base = html.escape(base[:12]) if isinstance(base, str) else ""
+        items.append(('info', f"After は作業ツリー（未 commit を含む。基準 HEAD <code>{base}</code>）。"
+                              "push 対象の commit と対応しないので、commit 比較の代用にしない"))
+    if manifest.get("inputs_changed_during_capture"):
+        items.append(('bad', "⚠️ 撮影中に入力が変わった（作業ツリーが編集された）。撮った After は今の作業ツリーと一致しない。撮り直すこと"))
+    unsupported = manifest.get("unsupported") or []
+    if unsupported:
+        rows = "".join(f"<li><code>{html.escape(str(u.get('source_file', '')))}</code>"
+                       f"{'（' + html.escape(str(u.get('route'))) + '）' if u.get('route') else ''}"
+                       f" — {html.escape(str(u.get('reason', '')))}</li>" for u in unsupported[:20])
+        more = "" if len(unsupported) <= 20 else f"<li>ほか {len(unsupported) - 20} 件</li>"
+        items.append(('warn', f"初版では未対応（この比較に写っていない変更）: <ul>{rows}{more}</ul> Simulator 等で別途確認する"))
+    caveat = manifest.get("data_caveat")
+    if caveat:
+        items.append(('info', html.escape(str(caveat))))
+    if not items:
+        return ""
+    cls = {"info": "notice info", "bad": "notice bad", "warn": "notice"}
+    return '<div class="notices">' + "".join(f'<div class="{cls[k]}">{v}</div>' for k, v in items) + "</div>"
+
+
 def render(manifest: dict, template_text: str) -> str:
     screens = manifest["screens"]
     screen_cards = "\n".join(render_screen_card(s) for s in screens)
+    heading, subheading = render_heading(manifest)
     toc_links = "\n".join(
         f'<a href="#screen-{re.sub(r"[^a-zA-Z0-9_-]", "", s["screen_id"])}">{html.escape(s.get("title", s["screen_id"]))}</a>'
         for s in screens
@@ -212,6 +285,9 @@ def render(manifest: dict, template_text: str) -> str:
     validation_class = "ok" if "PASSED" in validation_status.upper() or "ERROR 0" in validation_status.upper() else "bad"
 
     replacements = {
+        "{{HEADING}}": heading,
+        "{{SUBHEADING}}": subheading,
+        "{{NOTICES}}": render_notices(manifest),
         "{{PR_NUMBER}}": str(manifest.get("pr_number", "")),
         "{{PR_TITLE}}": html.escape(manifest.get("pr_title", "")),
         "{{PR_URL}}": html.escape(manifest.get("pr_url", "")),

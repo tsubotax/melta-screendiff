@@ -178,9 +178,34 @@ OPEN PR の Before をどこから撮るかで、比較に映るものが変わ�
 
 `output_dir/<PR番号>/<実行時刻>/` に出力し、`output_dir/<PR番号>/latest` が最新実行を指す。同一PRの撮り直し（レビュー指摘 → 修正 push → 再撮影）で前イテレーションの証跡が消えず、中断した回に前回の比較HTMLを掴むこともない。過去の実行ディレクトリは自動削除しない。
 
-### 対象外（将来課題）
+### 範囲モード（PR を使わない Before/After）
 
-**未pushのローカルコミットを撮る用途**（working-tree プレビュー）はスコープ外。PR先端と一致しない状態は撮影前に中断する。「push前に見た目だけ確認したい」は正当なニーズだが、共有用比較のゲートを緩めて対応すべきではないため、別モードとして持つべき課題として保留している。
+PR を出さず main へ直接 push する一人開発や、push 前に見た目だけ確かめたい場面向けの**別の入口**。PR モードのゲート（HEAD 一致・base 先行チェック）は一切緩めず、`screendiff_range.py` が 2 点（または作業ツリー）を**隔離 snapshot** からビルドして比較する。作業ツリーで checkout も stash もしない。
+
+```
+/screendiff:screendiff --range origin/main..HEAD        # 未 push の commit 群
+/screendiff:screendiff --range HEAD --after worktree     # 未 commit を After に（明示実行のみ）
+```
+
+結果の `run_status` は 5 値で、**どの値でも通常の push を止めない**:
+
+| run_status | 意味 |
+|---|---|
+| `compared` | 比較 HTML ができた |
+| `no_ui_change` | 対象ファイルの変更が無い（何もビルドしない） |
+| `skipped_dependency_change` | package / lock / patches が Before・After・共有元で一致せず撮らない |
+| `skipped_runner_unavailable` | ブラウザを起動できない環境（sandbox 内など）。通常の Terminal から再実行 |
+| `failed` | ビルド・配信・描画の失敗 |
+
+事故対策（設計レビュー 3 周で固定）:
+
+- **依存の 3 者一致**: snapshot の `node_modules` は作業ツリーへの symlink なので、Before・After・作業ツリーの依存ファイルのハッシュが揃わないと撮らない（揃わないと両側が別の依存でビルドされる）
+- **nonce で配信元を確認**: side ごとの export 先に実行固有の nonce を置き、URL 経由で同じ中身が返るまで ready にしない。固定ポートなら起動前に応答があれば中断する（前回の残存サーバを撮らない）
+- **撮った同じブラウザで検査**: `location.pathname` と画面固有の `ready_selector` を要求し、成立しない画面は「比較不能」にする（SPA フォールバックや JS 遷移で同じ画面を 2 回撮って「差分なし」と誤結論しない）
+- **作業ツリー比較は内容ハッシュを前後で突き合わせ**、撮影中に変わったら HTML に大きく出す。push 対象の commit と対応しないので commit 比較の代用にしない
+- **画面の分類は機械に任せる**: expo-router なら `screens.resolver: "expo_router"` がファイルパスから「直接撮る / 代表画面 / 未対応」を決める。手書きの route_map は子画面を親画面に解決する誤りをレビュー 3 周連続で残した（docs/contracts.md §2.1）
+
+設定は `range` 節に書く（サンプル: `examples/screendiff.range-expo.json`、契約: docs/contracts.md §1.5）。Codex からは `codex/screendiff/SKILL.md` を手順書として読む。
 
 ## 設計の背景
 

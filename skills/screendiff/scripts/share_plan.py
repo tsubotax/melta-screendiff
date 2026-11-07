@@ -17,11 +17,15 @@
 **"artifact_unavailable" として PR書き込みも止める**。Artifact URL を作れないのに PR 本文へ
 追記する経路（＝リンク先の無い案内をPRに残す）を塞ぐため。
 
+`--mode range`（範囲モード。PR が無い）では **share_mode に関わらず PR への書き込みを禁止**する。
+artifact なら Artifact の発行だけ許し、URL の配布先（Slack 投稿など）は人間が決める。
+
 使い方:
     python3 share_plan.py --config-json "$CONFIG_JSON" [--share local|artifact]
-                          [--author] [--no-artifact]
+                          [--author] [--no-artifact] [--mode pr|range]
+    `--config-json -` で標準入力から config を読む
 
-出力（stdout, JSON）: share_mode / source / allow_* / actions / forbidden。exit 0。
+出力（stdout, JSON）: share_mode / source / mode / allow_* / actions / forbidden。exit 0。
 config が読めない等は exit 1（そのときは共有フェーズに進まない）。
 """
 import argparse
@@ -30,8 +34,9 @@ import sys
 from pathlib import Path
 
 VALID_MODES = ("artifact", "local")
+VALID_RUN_MODES = ("pr", "range")
 
-# PRへの書き込み系。local / artifact_unavailable では必ず空になること（テストで固定）
+# PRへの書き込み系。local / artifact_unavailable / range では必ず空になること（テストで固定）
 PR_WRITE_ACTIONS = ("gh pr comment", "gh pr edit")
 
 
@@ -40,7 +45,7 @@ def emit(payload: dict, code: int) -> int:
     return code
 
 
-def build_plan(config_mode, override, author: bool, artifact_available: bool) -> dict:
+def build_plan(config_mode, override, author: bool, artifact_available: bool, run_mode: str = "pr") -> dict:
     if override is not None:
         mode, source = override, "実行時の明示指定"
     elif config_mode is not None:
@@ -48,9 +53,25 @@ def build_plan(config_mode, override, author: bool, artifact_available: bool) ->
     else:
         mode, source = "artifact", "既定値"
 
-    plan = {"share_mode": mode, "source": source, "author_mode": author}
+    plan = {"share_mode": mode, "source": source, "author_mode": author, "mode": run_mode}
 
-    if mode == "artifact" and not artifact_available:
+    if run_mode == "range":
+        # PR が無い。書き込む先が存在しないので、どの share_mode でも PR 書き込みは禁止
+        plan["allow_pr_write"] = False
+        if mode == "artifact" and artifact_available:
+            plan["effective"] = "range_artifact"
+            plan["allow_artifact"] = True
+            plan["actions"] = ["comparison.html を Artifact として提示する",
+                               "変更画面の要約（代表画面・比較不能・未対応の注記を含む）をチャットに提示する"]
+            plan["note"] = "Artifact URL をどこへ貼るか（Slack 投稿など）は人間が決める。PR は存在しない"
+        else:
+            plan["effective"] = "range_local"
+            plan["allow_artifact"] = False
+            plan["actions"] = ["comparison.html の絶対パスを提示する",
+                               "変更画面の要約（代表画面・比較不能・未対応の注記を含む）をチャットに提示する"]
+            plan["note"] = ("配布は人間が手で行う。PR は存在しない"
+                            if mode == "local" else "Artifact を発行できない環境のためローカル HTML のみ")
+    elif mode == "artifact" and not artifact_available:
         # Artifact を出せないのに PR へ「比較はArtifactにあります」と書く経路を塞ぐ
         plan["effective"] = "artifact_unavailable"
         plan["allow_artifact"] = False
@@ -88,16 +109,19 @@ def build_plan(config_mode, override, author: bool, artifact_available: bool) ->
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config-json", required=True, help="load_config.py の出力を保存したファイル")
+    parser.add_argument("--config-json", required=True, help="load_config.py の出力を保存したファイル（- で標準入力）")
     parser.add_argument("--share", default=None, choices=VALID_MODES,
                         help="config より優先する明示指定")
     parser.add_argument("--author", action="store_true", help="authorモード（PR作者が自分のPRに添付）")
     parser.add_argument("--no-artifact", action="store_true",
                         help="Artifact 機能が使えない環境")
+    parser.add_argument("--mode", default="pr", choices=VALID_RUN_MODES,
+                        help="pr（既定）| range（PR が無い範囲モード。PR 書き込みは常に禁止）")
     args = parser.parse_args()
 
     try:
-        config = json.loads(Path(args.config_json).read_text(encoding="utf-8"))
+        raw = sys.stdin.read() if args.config_json == "-" else Path(args.config_json).read_text(encoding="utf-8")
+        config = json.loads(raw)
     except (OSError, UnicodeDecodeError, ValueError) as e:
         return emit({"error": f"config を読めません: {e}"}, 1)
     if not isinstance(config, dict):
@@ -110,7 +134,7 @@ def main() -> int:
         return emit({"error": f'config.share_mode が不正です: {config_mode!r}',
                      "hint": f"許容値: {' | '.join(VALID_MODES)}"}, 1)
 
-    return emit(build_plan(config_mode, args.share, args.author, not args.no_artifact), 0)
+    return emit(build_plan(config_mode, args.share, args.author, not args.no_artifact, args.mode), 0)
 
 
 if __name__ == "__main__":
