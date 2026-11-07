@@ -77,6 +77,15 @@ FAKE_CAPTURE_HANG = textwrap.dedent('''
     time.sleep(30)
 ''')
 
+# 親（npm / shell 相当）は SIGTERM で素直に死ぬが、子のサーバは SIGTERM を無視する配信構成
+STUBBORN_SERVE = textwrap.dedent('''
+    #!/usr/bin/env python3
+    import signal, subprocess, sys
+    child = subprocess.Popen([sys.executable, "-u", "-m", "http.server", "0", "--bind", "127.0.0.1"],
+                             preexec_fn=lambda: signal.signal(signal.SIGTERM, signal.SIG_IGN))
+    child.wait()
+''')
+
 
 def git(repo: Path, *args):
     return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=True)
@@ -110,6 +119,8 @@ class Base(unittest.TestCase):
         self.capture_page_fail.write_text(FAKE_CAPTURE_PAGE_FAIL)
         self.capture_hang = self.root / "fake_capture_hang.py"
         self.capture_hang.write_text(FAKE_CAPTURE_HANG)
+        self.stubborn_serve = self.root / "stubborn_serve.py"
+        self.stubborn_serve.write_text(STUBBORN_SERVE)
         self.out_dir = self.root / "out"
 
     def tearDown(self):
@@ -329,6 +340,30 @@ class TestServerSafety(Base):
                 import urllib.request
                 urllib.request.urlopen(url, timeout=1)
 
+    def assert_group_gone(self, pgid: int, what: str) -> None:
+        """プロセスグループが消えていること。残っていれば kill してから落とす（陰性対照で漏らさない）"""
+        time.sleep(0.3)
+        alive = True
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            alive = False
+        if alive:
+            import signal
+            os.killpg(pgid, signal.SIGKILL)
+        self.assertFalse(alive, f"{what}（pgid {pgid}）が残っている")
+
+    def test_child_server_ignoring_sigterm_is_not_reported_as_stopped(self):
+        """親が SIGTERM で先に死んでも、ポートを掴んだ子が残っていれば停止成功にしない（グループ全体を見る）"""
+        self.write("app/home.html", '<div data-path="/home.html">v2</div>')
+        v2 = self.commit("v2")
+        cfg = self.config(range={"serve_command": f'cd "$SCREENDIFF_WEB_DIR" && python3 -u {self.stubborn_serve}'})
+        code, out = self.run_range(self.v1, v2, cfg)
+        self.assertEqual(out["run_status"], "compared", out)
+        for side in ("before", "after"):
+            self.assertTrue(out["sides"][side]["server_stopped"])
+            self.assert_group_gone(out["sides"][side]["server_pgid"], f"{side} の子サーバ")
+
     def test_capture_timeout_stops_server_and_keeps_result_json(self):
         """撮影プロセスが固まっても配信サーバを残さず、out_dir 付きの result.json を書く"""
         import urllib.request
@@ -340,21 +375,12 @@ class TestServerSafety(Base):
         self.assertEqual(out["run_status"], "failed")
         self.assertIn("タイムアウト", out["reason"])
         saved = json.loads((Path(out["out_dir"]) / "result.json").read_text())
+        # ⚠️ URL への GET 失敗では判定しない。親が死ぬと stdout のパイプが切れ、残存サーバは応答できないまま
+        # 居座る（ポートを掴んだまま）。プロセスグループの生存を直接見る。
+        # 他の assert より先に見て、残っていれば kill してから落とす（陰性対照で毎回 1 本漏らさない）
+        self.assert_group_gone(saved["sides"]["before"]["server_pgid"], "配信サーバ")
         self.assertEqual(saved["run_status"], "failed")
         self.assertTrue(saved["sides"]["before"]["server_stopped"])
-        # ⚠️ URL への GET 失敗では判定しない。親が死ぬと stdout のパイプが切れ、残存サーバは応答できないまま
-        # 居座る（ポートを掴んだまま）。プロセスグループの生存を直接見る
-        pgid = saved["sides"]["before"]["server_pgid"]
-        time.sleep(0.3)
-        alive = True
-        try:
-            os.killpg(pgid, 0)
-        except ProcessLookupError:
-            alive = False
-        if alive:
-            import signal
-            os.killpg(pgid, signal.SIGKILL)   # 後始末してから落とす
-        self.assertFalse(alive, f"配信サーバ（pgid {pgid}）が残っている")
 
 
 class TestRefPinning(Base):
@@ -411,6 +437,16 @@ class TestSnapshotIntegrity(Base):
             self.assertIn(msg, out["reason"], bad)
         self.assertFalse((self.repo / "node_modules" / "evil.txt").exists())
         self.assertFalse((self.root / "evil.txt").exists())
+
+    def test_fixture_rejection_does_not_create_directories_outside_snapshot(self):
+        """拒否する fixture のために、共有 node_modules の中へディレクトリだけ作ってしまわない（検査は mkdir より先）"""
+        self.write("app/home.html", '<div data-path="/home.html">v2</div>')
+        v2 = self.commit("v2")
+        cfg = self.config(range={"fixtures": [{"path": "node_modules/new-fixture/sub/config.json", "base64": "e30="}]})
+        code, out = self.run_range(self.v1, v2, cfg)
+        self.assertEqual(out["run_status"], "failed", out)
+        self.assertIn("fixture", out["reason"])
+        self.assertFalse((self.repo / "node_modules" / "new-fixture").exists())
 
 
 class TestSameScreenTwiceIsCaught(Base):

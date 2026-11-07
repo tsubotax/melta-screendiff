@@ -162,10 +162,11 @@ def make_snapshot(repo: Path, ref: str | None, dest: Path, rng: dict) -> dict:
         if rel.is_absolute() or ".." in rel.parts:
             raise RuntimeError(f"fixture のパスは snapshot 相対で .. を含まないこと: {fx['path']}")
         p = dest / fx["path"]
-        p.parent.mkdir(parents=True, exist_ok=True)
-        # symlink（共有 node_modules 等）を経由して snapshot の外へ書かない
+        # symlink（共有 node_modules 等）を経由して snapshot の外へ書かない。**mkdir より先に**検査する
+        # （先に mkdir すると、拒否はしても共有元にディレクトリだけ作ってしまう）
         if not p.parent.resolve().is_relative_to(dest_real) or p.is_symlink():
             raise RuntimeError(f"fixture の書き込み先が snapshot の外に出る（symlink 経由）: {fx['path']}")
+        p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(base64.b64decode(fx["base64"]))
     return {"inputs_sha256": digest, "inputs_count": len(files)}
 
@@ -234,28 +235,46 @@ class Server:
         self.stop()
         raise RuntimeError(f"{url} が今回の export（nonce）を返さない。別の配信元を見ているか起動失敗")
 
+    def _group_alive(self) -> bool:
+        """プロセスグループに 1 つでも生きているプロセスがあるか（親だけでなく npm / shell の子も含む）。"""
+        if self.proc.poll() is None:
+            return True
+        try:
+            os.killpg(self.proc.pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
+    def _wait_group_gone(self, timeout: float) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.proc.poll() is None:
+                try:
+                    self.proc.wait(timeout=0.2)
+                except subprocess.TimeoutExpired:
+                    pass
+            if not self._group_alive():
+                return True
+            time.sleep(0.1)
+        return not self._group_alive()
+
     def stop(self) -> bool:
+        """グループ全体が消えるまで待つ。親（bash / npm）が先に死んでも、ポートを掴んだ子が残っていれば停止成功にしない。"""
         if self.proc is None:
             return True
         import signal
-        try:
-            os.killpg(self.proc.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            self.proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
             try:
-                os.killpg(self.proc.pid, signal.SIGKILL)
+                os.killpg(self.proc.pid, sig)
             except ProcessLookupError:
                 pass
-            try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                return False
-        if self in ACTIVE_SERVERS:
-            ACTIVE_SERVERS.remove(self)
-        return True
+            if self._wait_group_gone(5):
+                if self in ACTIVE_SERVERS:
+                    ACTIVE_SERVERS.remove(self)
+                return True
+        return False
 
 
 # ---------------------------------------------------------------------------
