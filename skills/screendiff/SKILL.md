@@ -36,7 +36,7 @@ stdout JSON の `run_status` で分岐する。**どの値でも通常の push �
 | `no_ui_change` | 「UI 変更なし（対象ファイル 0 件）」1 行で終わる |
 | `skipped_dependency_change` | 「依存変更のため比較対象外」1 行。撮影成功に数えない |
 | `skipped_runner_unavailable` | sandbox の外（通常の Terminal / cmux の自分のペイン）からの再実行を案内する |
-| `failed` | `reason` と `out_dir` のログを提示する |
+| `failed` | `reason` と `out_dir` のログを提示する。`unsupported[]` / `unresolved[]` があれば「未対応: <ファイル>（Simulator 等で確認）」を併記する（対象ファイルはあるのに撮れる画面が 0 のときはこの形で failed になる。「変更なし」と書かない） |
 
 `compared` の要約で**必ず落とさない注記**（落とすと成功偽装になる）:
 

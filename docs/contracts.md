@@ -213,9 +213,30 @@ PR を使わず 2 点（または作業ツリー）を比較するときの設�
   "serve_command": "node design/serve.mjs --dir \"$SCREENDIFF_WEB_DIR\" --port 0",   // 起動時に URL を出力する、か serve_url を指定
   "serve_url": null,                 // 固定ポートのとき。起動前に応答があれば中断（残存サーバを撮らない）
   "device_scale_factor": 3, "ready_timeout_ms": 10000, "build_timeout_sec": 600,
+  "capture_timeout_sec": 180,        // 1 画面の撮影プロセスの上限。超えたら failed（配信サーバは止める）
   "data_caveat": null                // null なら既定の「API データは固定していない」注記を HTML に出す
 }
 ```
+
+runner の不変条件（screendiff_range.py）:
+
+- `--before` / `--after` は最初に commit OID へ固定し、以後の diff・依存検査・snapshot はその OID だけを使う。
+  ビルド中に別ターミナルで commit / fetch されても After の中身は `head_oid` と一致する
+- 依存ファイル（`dependency_change_patterns`）は **`snapshot_paths` と独立にリポ全体から**探す。`node_modules_link` を
+  使う設定でパターンが 3 者とも 0 件なら設定ミスとして `failed`（一致扱いで素通りさせない）
+- `target_file_patterns` に当たる変更があるのに撮れる画面が 0（動的ルートだけ・route_map 不一致だけ）のときは
+  `no_ui_change` でなく **`failed`**。`unsupported` / `unresolved` を result に残す（未確認を「変更なし」で消さない）
+- 作業ツリー snapshot の `inputs_sha256` は**コピーした実体**から取る（コピー元を読み直すと保存のタイミングで取り違える）
+- fixture の書き込み先は snapshot の内側に限る（絶対パス・`..`・共有 `node_modules` の symlink 経由は `failed`）
+- 配信サーバは例外・Ctrl-C・撮影タイムアウトでも止める。途中で落ちた回も `out_dir/result.json` に `sides[].serve_url` と
+  理由が残る
+- `capture_browser.mjs` の exit 1（`stage` が `load` / `launch`）だけを `skipped_runner_unavailable` に分類する。
+  `stage: "page"`（goto タイムアウト・保存失敗）は当該画面の `compare_status: unresolvable`
+- Before を 1 枚も撮れていない回（全画面が新規）は manifest に `before_oid` / `before_base` を書かない（§4）
+
+⚠️ **隔離の保証範囲**: snapshot の `node_modules` は作業ツリーへの**書き込み可能な symlink**なので、`build_command`
+が `node_modules/.cache` 等へ書くことまでは止めない。runner が保証するのは「作業ツリーの追跡ファイルと `.git` に
+触らない」ことで、共有 `node_modules` の無変更ではない。
 
 load_config.py は `build_command` / `serve_command` のどちらかがあれば範囲モードの設定として検証する
 （両方必須、`snapshot_paths` 非空、`node_modules_link` を使うなら `dependency_change_patterns` 必須、

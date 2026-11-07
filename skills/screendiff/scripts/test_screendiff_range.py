@@ -58,8 +58,23 @@ FAKE_CAPTURE = textwrap.dedent('''
 FAKE_CAPTURE_LAUNCH_FAIL = textwrap.dedent('''
     #!/usr/bin/env python3
     import json, sys
-    print(json.dumps({"ok": False, "error": "browserType.launch: Permission denied (sandbox)", "file": None}))
+    print(json.dumps({"ok": False, "error": "browserType.launch: Permission denied (sandbox)", "file": None, "stage": "launch"}))
     sys.exit(1)
+''')
+
+# ページ段階の失敗（goto タイムアウト等）。runner は exit code だけでなく stage で分類する契約なので、
+# わざと exit 1 で返して「stage=page なら環境問題にしない」ことを確かめる
+FAKE_CAPTURE_PAGE_FAIL = textwrap.dedent('''
+    #!/usr/bin/env python3
+    import json, sys
+    print(json.dumps({"ok": False, "error": "page.goto: Timeout 30000ms exceeded", "file": None, "stage": "page"}))
+    sys.exit(1)
+''')
+
+FAKE_CAPTURE_HANG = textwrap.dedent('''
+    #!/usr/bin/env python3
+    import time
+    time.sleep(30)
 ''')
 
 
@@ -91,6 +106,10 @@ class Base(unittest.TestCase):
         self.capture.write_text(FAKE_CAPTURE)
         self.capture_fail = self.root / "fake_capture_fail.py"
         self.capture_fail.write_text(FAKE_CAPTURE_LAUNCH_FAIL)
+        self.capture_page_fail = self.root / "fake_capture_page_fail.py"
+        self.capture_page_fail.write_text(FAKE_CAPTURE_PAGE_FAIL)
+        self.capture_hang = self.root / "fake_capture_hang.py"
+        self.capture_hang.write_text(FAKE_CAPTURE_HANG)
         self.out_dir = self.root / "out"
 
     def tearDown(self):
@@ -159,8 +178,24 @@ class TestHappyPath(Base):
         self.assertFalse(out["share_plan"]["allow_pr_write"])
         html = Path(out["comparison_html"]).read_text()
         self.assertIn("範囲比較", html)
+        # data_caveat を省略（null）しても既定の注記が出る（契約 §1.5）
+        self.assertIn("API データは固定していない", html)
         # nonce ファイルは撮影対象に含めない
         self.assertNotIn("screendiff-", out["screens"][0]["screen_id"])
+
+    def test_all_new_screens_omit_before_oid(self):
+        """Before を 1 枚も撮っていない回は before_oid / before_base を manifest に残さない（契約 §4）"""
+        self.write("app/new.html", '<div data-path="/new.html">brand new</div>')
+        v2 = self.commit("new screen")
+        cfg = self.config(screens={"route_map": [
+            {"file_pattern": "^app/new\\.html$", "id": "new", "path": "/new.html", "title": "New"}]})
+        code, out = self.run_range(self.v1, v2, cfg)
+        self.assertEqual(out["run_status"], "compared", out)
+        self.assertEqual(out["screens"][0]["compare_status"], "new")
+        manifest = json.loads((Path(out["out_dir"]) / "manifest.json").read_text())
+        self.assertNotIn("before_oid", manifest)
+        self.assertNotIn("before_base", manifest)
+        self.assertEqual(manifest["head_oid"], v2)
 
     def test_worktree_after(self):
         self.write("app/about.html", '<div data-path="/about.html">about wip</div>')
@@ -198,6 +233,19 @@ class TestNoUiChange(Base):
         self.assertEqual(out["run_status"], "failed")
         self.assertIn("nosuchref", out["reason"])
 
+    def test_targets_without_resolvable_screen_is_failed_not_no_change(self):
+        """UI の対象ファイルはあるのに撮れる画面が 0（動的ルートだけ等）→ 未確認を「変更なし」で消さない"""
+        self.write("misc/widget.js", "// ui-ish but not routable\n")
+        v2 = self.commit("misc")
+        cfg = self.config(target_file_patterns=["^app/", "^misc/"])
+        code, out = self.run_range(self.v1, v2, cfg)
+        self.assertEqual(code, 1)
+        self.assertEqual(out["run_status"], "failed")
+        self.assertEqual(out["target_files"], ["misc/widget.js"])
+        self.assertEqual(len(out["unresolved"]), 1)
+        self.assertIn("撮れる画面に解決されない", out["reason"])
+        self.assertFalse((Path(out["out_dir"]) / "before").exists())
+
 
 class TestDependencyGate(Base):
     def test_dependency_change_in_range_is_skipped(self):
@@ -222,6 +270,27 @@ class TestDependencyGate(Base):
         v2 = self.commit("v2")
         code, out = self.run_range(self.v1, v2, self.config())
         self.assertEqual(out["run_status"], "compared")
+        self.assertEqual(out["dependency_files"], {"before": 1, "after": 1, "shared": 1})
+
+    def test_dependency_outside_snapshot_paths_is_still_checked(self):
+        """package.json が snapshot_paths の外にあっても依存検査の対象（見落とすと別の依存でビルドする）"""
+        self.write("package.json", '{"name":"x","version":"2"}\n')
+        self.write("app/home.html", '<div data-path="/home.html">home v2</div>')
+        v2 = self.commit("deps outside snapshot")
+        cfg = self.config(range={"snapshot_paths": ["app", "lib"]})
+        code, out = self.run_range(self.v1, v2, cfg)
+        self.assertEqual(out["run_status"], "skipped_dependency_change", out)
+
+    def test_patterns_matching_nothing_is_a_config_error(self):
+        """依存パターンが 3 者とも 0 件なら「一致」でなく設定ミス。素通りさせない"""
+        self.write("app/home.html", '<div data-path="/home.html">home v2</div>')
+        v2 = self.commit("v2")
+        cfg = self.config(range={"dependency_change_patterns": ["^does-not-exist\\.json$"]})
+        code, out = self.run_range(self.v1, v2, cfg)
+        self.assertEqual(code, 1)
+        self.assertEqual(out["run_status"], "failed")
+        self.assertIn("0 件", out["reason"])
+        self.assertFalse((Path(out["out_dir"]) / "before").exists())
 
 
 class TestServerSafety(Base):
@@ -259,6 +328,89 @@ class TestServerSafety(Base):
             with self.assertRaises(Exception):
                 import urllib.request
                 urllib.request.urlopen(url, timeout=1)
+
+    def test_capture_timeout_stops_server_and_keeps_result_json(self):
+        """撮影プロセスが固まっても配信サーバを残さず、out_dir 付きの result.json を書く"""
+        import urllib.request
+        self.write("app/home.html", '<div data-path="/home.html">v2</div>')
+        v2 = self.commit("v2")
+        cfg = self.config(range={"capture_timeout_sec": 1})
+        code, out = self.run_range(self.v1, v2, cfg, capture=self.capture_hang)
+        self.assertEqual(code, 1)
+        self.assertEqual(out["run_status"], "failed")
+        self.assertIn("タイムアウト", out["reason"])
+        saved = json.loads((Path(out["out_dir"]) / "result.json").read_text())
+        self.assertEqual(saved["run_status"], "failed")
+        self.assertTrue(saved["sides"]["before"]["server_stopped"])
+        # ⚠️ URL への GET 失敗では判定しない。親が死ぬと stdout のパイプが切れ、残存サーバは応答できないまま
+        # 居座る（ポートを掴んだまま）。プロセスグループの生存を直接見る
+        pgid = saved["sides"]["before"]["server_pgid"]
+        time.sleep(0.3)
+        alive = True
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            alive = False
+        if alive:
+            import signal
+            os.killpg(pgid, signal.SIGKILL)   # 後始末してから落とす
+        self.assertFalse(alive, f"配信サーバ（pgid {pgid}）が残っている")
+
+
+class TestRefPinning(Base):
+    def test_after_ref_is_pinned_before_the_before_build(self):
+        """Before のビルド中に HEAD が進んでも、After は実行開始時の OID の中身を撮る"""
+        self.write("app/home.html", '<div data-path="/home.html">home v2</div>')
+        v2 = self.commit("v2")
+        bump = (f'if [ "$SCREENDIFF_SIDE" = before ]; then '
+                f'echo "<div data-path=\\"/home.html\\">home v3</div>" > "{self.repo}/app/home.html" && '
+                f'git -C "{self.repo}" add -A && git -C "{self.repo}" commit -q -m v3; fi')
+        cfg = self.config(range={"build_command": f'mkdir -p "$SCREENDIFF_WEB_DIR" && cp -R app/. "$SCREENDIFF_WEB_DIR"/ && {bump}'})
+        code, out = self.run_range(self.v1, "HEAD", cfg)
+        self.assertEqual(out["run_status"], "compared", out)
+        self.assertEqual(out["head_oid"], v2)
+        self.assertNotEqual(git(self.repo, "rev-parse", "HEAD").stdout.strip(), v2)   # 実際に HEAD は進んだ
+        shot = (Path(out["out_dir"]) / "after" / "shots" / "after-home-p1.png").read_bytes()
+        self.assertIn(b"home v2", shot)
+        self.assertNotIn(b"home v3", shot)
+
+
+class TestSnapshotIntegrity(Base):
+    def test_worktree_snapshot_hash_is_of_the_copied_bytes(self):
+        """ハッシュはコピーした実体から。コピー後に元を書き換えても snapshot のハッシュは旧内容を指す"""
+        sys.path.insert(0, str(SCRIPTS))
+        import screendiff_range as sr
+        rng = {"snapshot_paths": ["app"], "fixtures": []}
+        dest = self.root / "snap"
+        files = sr.inventory(self.repo, None, ["app"])
+        original = sr.shutil.copyfile
+
+        def copy_then_edit_source(src, dst, *a, **kw):
+            # コピー完了直後にエディタが保存した状況を作る（コピー〜ハッシュ取得の隙間）
+            r = original(src, dst, *a, **kw)
+            Path(src).write_text(Path(src).read_text() + "<!-- saved right after copy -->")
+            return r
+
+        sr.shutil.copyfile = copy_then_edit_source
+        try:
+            info = sr.make_snapshot(self.repo, None, dest, rng)
+        finally:
+            sr.shutil.copyfile = original
+        self.assertEqual(info["inputs_sha256"], sr.inputs_hash(dest, None, files))
+        self.assertNotEqual(info["inputs_sha256"], sr.inputs_hash(self.repo, None, files))
+
+    def test_fixture_cannot_escape_snapshot(self):
+        """fixture の書き込み先が共有 node_modules（symlink）や .. を通って作業ツリーへ出ない"""
+        self.write("app/home.html", '<div data-path="/home.html">v2</div>')
+        v2 = self.commit("v2")
+        for bad, msg in (("node_modules/evil.txt", "symlink"), ("../evil.txt", ".."), ("/tmp/evil.txt", "..")):
+            cfg = self.config(range={"fixtures": [{"path": bad, "base64": "aGk="}]})
+            code, out = self.run_range(self.v1, v2, cfg)
+            self.assertEqual(out["run_status"], "failed", out)
+            self.assertIn("fixture", out["reason"])
+            self.assertIn(msg, out["reason"], bad)
+        self.assertFalse((self.repo / "node_modules" / "evil.txt").exists())
+        self.assertFalse((self.root / "evil.txt").exists())
 
 
 class TestSameScreenTwiceIsCaught(Base):
@@ -318,6 +470,17 @@ class TestRunnerUnavailable(Base):
         self.assertEqual(code, 0)
         self.assertEqual(out["run_status"], "skipped_runner_unavailable")
         self.assertTrue(out["sides"]["before"]["server_stopped"])
+
+    def test_page_stage_failure_is_unresolvable_not_runner_unavailable(self):
+        """goto タイムアウト等の画面固有の失敗は、環境問題（再実行案内）に分類しない"""
+        self.write("app/home.html", '<div data-path="/home.html">v2</div>')
+        v2 = self.commit("v2")
+        code, out = self.run_range(self.v1, v2, self.config(), capture=self.capture_page_fail)
+        self.assertNotEqual(out["run_status"], "skipped_runner_unavailable")
+        self.assertEqual(out["run_status"], "failed")   # 全画面が比較不能
+        self.assertEqual(out["screens"][0]["compare_status"], "unresolvable")
+        self.assertIn("page.goto", out["screens"][0]["compare_reason"])
+        self.assertTrue(out["sides"]["after"]["server_stopped"])
 
 
 if __name__ == "__main__":

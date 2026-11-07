@@ -116,6 +116,9 @@ DEFAULTS = {
         "device_scale_factor": 1,
         "ready_timeout_ms": 10000,
         "build_timeout_sec": 600,
+        # 1 画面の撮影プロセスの上限。超えたら run_status=failed（サーバは止める）
+        "capture_timeout_sec": 180,
+        # null なら runner が既定の「API データは固定していない」注記を出す
         "data_caveat": None,
     },
 }

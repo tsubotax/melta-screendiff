@@ -204,6 +204,9 @@ PR を出さず main へ直接 push する一人開発や、push 前に見た目
 - **撮った同じブラウザで検査**: `location.pathname` と画面固有の `ready_selector` を要求し、成立しない画面は「比較不能」にする（SPA フォールバックや JS 遷移で同じ画面を 2 回撮って「差分なし」と誤結論しない）
 - **作業ツリー比較は内容ハッシュを前後で突き合わせ**、撮影中に変わったら HTML に大きく出す。push 対象の commit と対応しないので commit 比較の代用にしない
 - **画面の分類は機械に任せる**: expo-router なら `screens.resolver: "expo_router"` がファイルパスから「直接撮る / 代表画面 / 未対応」を決める。手書きの route_map は子画面を親画面に解決する誤りをレビュー 3 周連続で残した（docs/contracts.md §2.1）
+- **ref は開始時に OID へ固定**し、ビルド中の commit / fetch で After がズレない。撮れる画面が 0 の UI 変更は `failed` で未対応一覧を出す（「変更なし」にしない）。実装レビュー 1 周目の 5 件（docs/contracts.md §1.5「runner の不変条件」）
+
+保証しないこと: snapshot の `node_modules` は作業ツリーへの書き込み可能な symlink なので、ビルドが `node_modules/.cache` 等へ書くことは止めない。守るのは「作業ツリーの追跡ファイルと `.git` に触らない」まで。
 
 設定は `range` 節に書く（サンプル: `examples/screendiff.range-expo.json`、契約: docs/contracts.md §1.5）。Codex からは `codex/screendiff/SKILL.md` を手順書として読む。
 

@@ -17,6 +17,8 @@
 | `app_dir` 配下で動的セグメント（`[id]` 等）あり | **unsupported**（`fixed_params` に値があれば direct） | — |
 | `app_dir` 配下の `_layout` | **representative** | その階層直下の静的ルート（無ければ `representative` 既定） |
 | `app_dir` 配下の `+html` / `+not-found` / `_` 始まり / `route_prefix` 不一致 | **unsupported** | — |
+| `app_dir` 配下の `.ios` / `.android` / `.native` 付き（native 専用） | **unsupported** | — |
+| `app_dir` 配下の `.web` 付き | **direct**（`.web` を外したルート） | そのルート |
 | `app_dir` 外で `feature_map` に当たる | **representative** | feature_map の画面 |
 | `app_dir` 外で当たらない | **representative** | `representative` 既定の画面 |
 
@@ -34,6 +36,10 @@ from pathlib import Path, PurePosixPath
 
 ROUTE_EXT = (".tsx", ".ts", ".jsx", ".js")
 DYNAMIC_SEG = re.compile(r"\[[^\]]+\]")
+# プラットフォーム別ファイル（about.web.tsx / about.ios.tsx）。web 用はルート名から拡張子を外す。
+# native 専用は web export に入らないので撮れない（unsupported）
+WEB_PLATFORM_SUFFIX = ".web"
+NATIVE_PLATFORM_SUFFIXES = (".ios", ".android", ".native")
 
 
 def emit(payload: dict, code: int) -> int:
@@ -44,13 +50,18 @@ def emit(payload: dict, code: int) -> int:
 def route_from_file(app_dir: str, rel: str) -> tuple[str | None, str]:
     """app_dir 相対のルートファイルから URL パスを作る。(path, kind) を返す。
 
-    kind: "route" | "layout" | "special"（+html 等）| "not_route"（拡張子外）
+    kind: "route" | "layout" | "special"（+html 等）| "not_route"（拡張子外）| "native_only"（.ios/.android/.native）
     """
     inner = rel[len(app_dir):].lstrip("/")
     p = PurePosixPath(inner)
     if p.suffix not in ROUTE_EXT:
         return None, "not_route"
     name = p.stem
+    stem = PurePosixPath(name)
+    if stem.suffix in NATIVE_PLATFORM_SUFFIXES:
+        return None, "native_only"
+    if stem.suffix == WEB_PLATFORM_SUFFIX:
+        name = stem.stem
     parts = [seg for seg in p.parent.parts if not (seg.startswith("(") and seg.endswith(")"))]
     if name.startswith("+") or (name.startswith("_") and name != "_layout"):
         return None, "special"
@@ -104,10 +115,14 @@ def classify(cfg: dict, repo_root: Path, changed: list[str]) -> dict:
             if kind == "special":
                 unsupported.append({"source_file": rel, "reason": "expo-router の特殊ファイル（+html / +not-found / _ 始まり）"})
                 continue
+            if kind == "native_only":
+                unsupported.append({"source_file": rel, "reason": "native 専用のプラットフォーム別ファイル（web export に入らない。Simulator で確認）"})
+                continue
             if kind == "layout":
+                # その階層のルート自身（直下の index.tsx = path）と、1 段下の静的ルート
+                base = path.rstrip("/")
                 targets = [r for r in static_routes
-                           if (r == path or r.startswith(path.rstrip("/") + "/"))
-                           and r.count("/") == max(path.rstrip("/").count("/") + 1, 1)]
+                           if r == path or (r.startswith(base + "/") and r.count("/") == base.count("/") + 1)]
                 if not targets:
                     targets = list(default_rep)
                 if not targets:

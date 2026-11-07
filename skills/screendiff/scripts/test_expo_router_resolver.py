@@ -148,6 +148,15 @@ class TestRepresentative(Base):
         self.assertEqual(sorted(p), ["/melta/home", "/melta/search", "/melta/settings", "/melta/workshop"])
         self.assertTrue(all(v["representative"] for v in p.values()))
 
+    def test_layout_includes_its_own_index_route(self):
+        """post/_layout.tsx の変更は post/index.tsx（= /melta/post）も代表に含める。既定代表へ逃げない"""
+        for f in ("melta/post/_layout.tsx", "melta/post/index.tsx", "melta/post/drafts.tsx", "melta/post/[id].tsx"):
+            p = self.repo / APP / f
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("export default function S(){}\n")
+        _, out = _run(self.repo, CONFIG, f"{APP}/melta/post/_layout.tsx")
+        self.assertEqual(sorted(self.paths(out)), ["/melta/post", "/melta/post/drafts"])
+
     def test_no_representative_and_no_match_is_unsupported(self):
         cfg = json.loads(json.dumps(CONFIG))
         cfg["screens"]["expo_router"]["representative"] = []
@@ -166,6 +175,21 @@ class TestUnsupported(Base):
         _, out = _run(self.repo, CONFIG, f"{APP}/(tabs)/home.tsx", f"{APP}/lab/home-melta.tsx")
         self.assertEqual(out["resolved"], [])
         self.assertEqual({u["route"] for u in out["unsupported"]}, {"/home", "/lab/home-melta"})
+
+    def test_native_only_platform_file_is_unsupported(self):
+        _, out = _run(self.repo, CONFIG, f"{APP}/melta/about.ios.tsx", f"{APP}/melta/about.android.tsx")
+        self.assertEqual(out["resolved"], [])
+        self.assertEqual(len(out["unsupported"]), 2)
+        self.assertIn("native", out["unsupported"][0]["reason"])
+
+
+class TestPlatformSuffix(Base):
+    def test_web_suffix_is_stripped_from_route(self):
+        """about.web.tsx は /melta/about（/melta/about.web ではない）"""
+        _, out = _run(self.repo, CONFIG, f"{APP}/melta/about.web.tsx")
+        p = self.paths(out)
+        self.assertEqual(list(p), ["/melta/about"])
+        self.assertFalse(p["/melta/about"]["representative"])
 
 
 class TestConfigErrors(unittest.TestCase):

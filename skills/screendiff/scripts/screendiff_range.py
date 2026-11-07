@@ -26,7 +26,11 @@ exit code: compared / no_ui_change / skipped_* は 0、failed は 1。
   ready としない（前回の残存サーバや別の配信元を撮らない）
 - 撮った同じブラウザで pathname と ready_selector を検査（SPA フォールバック・JS 遷移対策）
 - worktree 比較は撮影前後で入力の内容ハッシュを突き合わせ、変化したら manifest と HTML に残す
-- 失敗を成功偽装しない: 画面ごとの compare_status と実行全体の run_status を別に持つ
+  （ハッシュは snapshot にコピーした実体から取る。コピー元を読み直すと保存のタイミングで見逃す）
+- 失敗を成功偽装しない: 画面ごとの compare_status と実行全体の run_status を別に持つ。
+  対象ファイルはあるのに撮れる画面が 0 のときは no_ui_change でなく failed（未確認を消さない）
+- ref は最初に commit OID へ固定し、以後の diff / snapshot はその OID だけを使う（ビルド中の commit / fetch でズレない）
+- 配信サーバは main の finally で必ず止める（Ctrl-C・撮影タイムアウト・node 不在でも残さない）
 """
 import argparse
 import base64
@@ -42,12 +46,15 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 SCRIPTS = Path(__file__).resolve().parent
 JST = timezone(timedelta(hours=9))
 RUN_STATUSES = ("compared", "no_ui_change", "skipped_dependency_change", "skipped_runner_unavailable", "failed")
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+DEFAULT_DATA_CAVEAT = "API データは固定していない。Before/After の間のデータ変動が差分に混ざりうる"
+# 起動した配信サーバ。main の finally で必ず止める（Ctrl-C・撮影タイムアウト・例外でも残さない）
+ACTIVE_SERVERS: list["Server"] = []
 
 
 def emit(payload: dict, code: int) -> int:
@@ -105,10 +112,12 @@ def inputs_hash(repo: Path, ref: str | None, files: list[str]) -> str:
     return h.hexdigest()
 
 
-def dependency_hash(repo: Path, ref: str | None, snapshot_paths: list[str], patterns: list[str]) -> str:
+def dependency_hash(repo: Path, ref: str | None, patterns: list[str]) -> tuple[str, int]:
+    """依存ファイルのハッシュと件数。snapshot_paths とは独立にリポ全体から探す
+    （snapshot の外にある package.json / lock を見落として、別の依存でビルドしない）。"""
     compiled = [re.compile(p) for p in patterns]
-    files = [f for f in inventory(repo, ref, snapshot_paths) if any(c.search(f) for c in compiled)]
-    return inputs_hash(repo, ref, files)
+    files = [f for f in inventory(repo, ref, []) if any(c.search(f) for c in compiled)]
+    return inputs_hash(repo, ref, files), len(files)
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +135,9 @@ def make_snapshot(repo: Path, ref: str | None, dest: Path, rng: dict) -> dict:
                 raise RuntimeError(f"nonregular input: {rel}")
             (dest / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, dest / rel)
+        # ハッシュは**コピーした実体**から取る。コピー元から読み直すと、コピー完了〜ハッシュ取得の間の
+        # 保存で「snapshot は旧内容・ハッシュは新内容」になり、撮影後の突き合わせが変化を見逃す
+        digest = inputs_hash(dest, None, files)
     else:
         ar = subprocess.Popen(["git", "archive", "--format=tar", ref, "--", *rng["snapshot_paths"]],
                               cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -133,7 +145,7 @@ def make_snapshot(repo: Path, ref: str | None, dest: Path, rng: dict) -> dict:
         _, err = ar.communicate()
         if ar.returncode or tar.returncode:
             raise RuntimeError(f"git archive {ref} に失敗: {err.decode(errors='replace').strip()}")
-    digest = inputs_hash(repo, ref, files)
+        digest = inputs_hash(repo, ref, files)
     link = rng.get("node_modules_link")
     if link:
         target = repo / link
@@ -144,9 +156,16 @@ def make_snapshot(repo: Path, ref: str | None, dest: Path, rng: dict) -> dict:
             raise RuntimeError(f"node_modules_link の実体が無い: {target}")
         nm.parent.mkdir(parents=True, exist_ok=True)
         nm.symlink_to(target, target_is_directory=True)
+    dest_real = dest.resolve()
     for fx in rng.get("fixtures", []):
+        rel = PurePosixPath(fx["path"])
+        if rel.is_absolute() or ".." in rel.parts:
+            raise RuntimeError(f"fixture のパスは snapshot 相対で .. を含まないこと: {fx['path']}")
         p = dest / fx["path"]
         p.parent.mkdir(parents=True, exist_ok=True)
+        # symlink（共有 node_modules 等）を経由して snapshot の外へ書かない
+        if not p.parent.resolve().is_relative_to(dest_real) or p.is_symlink():
+            raise RuntimeError(f"fixture の書き込み先が snapshot の外に出る（symlink 経由）: {fx['path']}")
         p.write_bytes(base64.b64decode(fx["base64"]))
     return {"inputs_sha256": digest, "inputs_count": len(files)}
 
@@ -181,6 +200,7 @@ class Server:
         self.proc = subprocess.Popen(["bash", "-c", self.cmd], cwd=self.cwd, env=self.env,
                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                      start_new_session=True)
+        ACTIVE_SERVERS.append(self)
         deadline = time.time() + timeout
         url = fixed_url
         lines = []
@@ -233,6 +253,8 @@ class Server:
                 self.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 return False
+        if self in ACTIVE_SERVERS:
+            ACTIVE_SERVERS.remove(self)
         return True
 
 
@@ -332,15 +354,41 @@ def main() -> int:
     config_json = out / "config.json"
     config_json.write_text(json.dumps(config, ensure_ascii=False, indent=2))
 
-    before_ref = a.before
-    after_ref = None if a.after == "worktree" else a.after
+
+    try:
+        return run(a, repo, config, rng, web, out, config_json, result)
+    except subprocess.TimeoutExpired as e:
+        cmd = e.cmd if isinstance(e.cmd, (list, tuple)) else [str(e.cmd)]
+        result.update(run_status="failed", reason=f"タイムアウト: {' '.join(str(c) for c in cmd[:3])}")
+    except KeyboardInterrupt:
+        result.update(run_status="failed", reason="中断（Ctrl-C）")
+    except Exception as e:  # noqa: BLE001  node 不在（FileNotFoundError）等。黙って抜けずに記録する
+        result.update(run_status="failed", reason=f"{type(e).__name__}: {e}")
+    finally:
+        # 配信サーバは独立セッションなので、ここで止めないと Ctrl-C でも生き残る
+        for srv in list(ACTIVE_SERVERS):
+            srv.stop()
+    (out / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+    return emit(result, 1)
+
+
+def run(a, repo: Path, config: dict, rng: dict, web: dict, out: Path, config_json: Path, result: dict) -> int:
+    def save() -> None:
+        (out / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+
+    before_name = a.before
+    after_name = None if a.after == "worktree" else a.after
     # ref の存在確認（typo を「変更なし」に倒さない）
-    for ref in (before_ref, after_ref):
+    for ref in (before_name, after_name):
         if ref and git(repo, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}").returncode != 0:
             result.update(run_status="failed", reason=f"ref を解決できない: {ref}")
             return emit(result, 1)
-    oids = {"before": git(repo, "rev-parse", before_ref).stdout.strip(),
-            "after": git(repo, "rev-parse", after_ref or "HEAD").stdout.strip()}
+    # ⚠️ 以後の git 操作は**ここで固定した OID だけ**を使う。`HEAD` / `origin/main` の名前のまま進めると、
+    # Before のビルド中に別ターミナルで commit / fetch されたとき After の中身が記録した OID とズレる
+    oids = {"before": git(repo, "rev-parse", f"{before_name}^{{commit}}").stdout.strip(),
+            "after": git(repo, "rev-parse", f"{after_name or 'HEAD'}^{{commit}}").stdout.strip()}
+    before_ref = oids["before"]
+    after_ref = None if after_name is None else oids["after"]
     result["before_oid"], result["head_oid"] = oids["before"], oids["after"]
     result["after_source"] = "worktree" if after_ref is None else "ref"
 
@@ -357,56 +405,70 @@ def main() -> int:
     result["target_files"] = targets
     if not targets:
         result.update(run_status="no_ui_change", reason="target_file_patterns に当たる変更が無い")
-        (out / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+        save()
         return emit(result, 0)
 
-    # 依存の 3 者一致
+    # 依存の 3 者一致（リポ全体から探す。snapshot_paths の外の package.json も対象）
+    dep_patterns = rng.get("dependency_change_patterns", [])
     try:
-        dep = {side: dependency_hash(repo, ref, rng["snapshot_paths"], rng.get("dependency_change_patterns", []))
+        dep = {side: dependency_hash(repo, ref, dep_patterns)
                for side, ref in (("before", before_ref), ("after", after_ref), ("shared", None))}
     except RuntimeError as e:
         result.update(run_status="failed", reason=str(e))
+        save()
         return emit(result, 1)
-    result["dependency_hashes"] = dep
-    if rng.get("node_modules_link") and len(set(dep.values())) != 1:
-        result.update(run_status="skipped_dependency_change",
-                      reason="package / lock / patches が Before・After・共有元（作業ツリー）で一致しない。隔離インストールは初版未対応")
-        (out / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
-        return emit(result, 0)
+    result["dependency_hashes"] = {side: h for side, (h, _) in dep.items()}
+    result["dependency_files"] = {side: n for side, (_, n) in dep.items()}
+    if rng.get("node_modules_link"):
+        if all(n == 0 for _, n in dep.values()):
+            result.update(run_status="failed",
+                          reason="dependency_change_patterns に当たるファイルが 3 者とも 0 件。パターンが実際の package.json / lock に"
+                                 "当たっていない（設定ミス）ので、依存一致を確認できない")
+            save()
+            return emit(result, 1)
+        if len({h for h, _ in dep.values()}) != 1:
+            result.update(run_status="skipped_dependency_change",
+                          reason="package / lock / patches が Before・After・共有元（作業ツリー）で一致しない。隔離インストールは初版未対応")
+            save()
+            return emit(result, 0)
 
     # Phase 2: 画面解決
     try:
         resolved = resolve_screens(config, config_json, repo, targets)
     except (RuntimeError, ValueError) as e:
         result.update(run_status="failed", reason=str(e))
+        save()
         return emit(result, 1)
     (out / "resolved.json").write_text(json.dumps(resolved, ensure_ascii=False, indent=2))
     screens = resolved.get("resolved", [])
     result["unsupported"] = resolved.get("unsupported", [])
     result["unresolved"] = resolved.get("unresolved", [])
     if not screens:
-        result.update(run_status="no_ui_change",
-                      reason="対象ファイルはあるが撮れる画面に解決されない（unsupported / unresolved を参照）")
-        (out / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
-        return emit(result, 0)
+        # UI の変更はあるのに撮れる画面が 1 つも無い。「変更なし」と報告すると未確認が消えるので failed
+        result.update(run_status="failed",
+                      reason="対象ファイルはあるが撮れる画面に解決されない。unsupported / unresolved の画面を Simulator 等で別途確認する")
+        save()
+        return emit(result, 1)
 
     # Phase 3/4: 両側
     env = dict(os.environ)
     env.update({k: str(v) for k, v in rng.get("env", {}).items()})
     capture_cmd = a.capture_cmd
+    capture_timeout = int(rng.get("capture_timeout_sec", 180))
     pw = repo / rng.get("playwright_module", "node_modules/playwright")
-    sides = {}
+    sides = result["sides"] = {}
     runner_unavailable = False
     for side, ref in (("before", before_ref), ("after", after_ref)):
         side_dir = out / side
         snap, web_dir, shots = side_dir / "input", side_dir / "web", side_dir / "shots"
         shots.mkdir(parents=True, exist_ok=True)
         web_dir.mkdir(parents=True, exist_ok=True)
-        info = {"ref": ref or "worktree"}
+        info = sides[side] = {"ref": ref or "worktree"}
         try:
             info.update(make_snapshot(repo, ref, snap, rng))
         except RuntimeError as e:
-            result.update(run_status="failed", reason=f"{side} の snapshot 作成に失敗: {e}", sides=sides)
+            result.update(run_status="failed", reason=f"{side} の snapshot 作成に失敗: {e}")
+            save()
             return emit(result, 1)
         side_env = dict(env, SCREENDIFF_WEB_DIR=str(web_dir), SCREENDIFF_SIDE=side)
         t0 = time.time()
@@ -417,9 +479,8 @@ def main() -> int:
         info["build_exit"] = b.returncode
         if b.returncode != 0:
             info["build_tail"] = (b.stdout + b.stderr)[-1500:]
-            sides[side] = info
-            result.update(run_status="failed", reason=f"{side} の build_command が失敗（build.log 参照）", sides=sides)
-            (out / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+            result.update(run_status="failed", reason=f"{side} の build_command が失敗（build.log 参照）")
+            save()
             return emit(result, 1)
         for s in screens:
             # 静的検査: export 成果物にそのルートの HTML があるか（SPA フォールバックで 200 が返る前に塞ぐ）
@@ -430,52 +491,55 @@ def main() -> int:
         (web_dir / nonce).write_text(nonce)
         srv = Server(rng["serve_command"], snap, side_env, side_dir / "serve.log")
         try:
-            url = srv.start(rng.get("serve_url"), web_dir, nonce, float(web.get("ready_timeout_sec", 60)))
-        except RuntimeError as e:
-            sides[side] = info
-            result.update(run_status="failed", reason=f"{side} の配信に失敗: {e}", sides=sides)
-            (out / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
-            return emit(result, 1)
-        info["serve_url"] = url
-        for s in screens:
-            if not s[f"{side}_html"]:
-                s[f"{side}_capture"] = {"ok": False, "error": "route html が export に無い"}
-                continue
-            png = shots / f"{side}-{s['screen_id']}-p1.png"
-            if capture_cmd:
-                cmd = ["bash", "-c", capture_cmd + ' "$@"', "_"]
-            else:
-                cmd = ["node", str(SCRIPTS / "backends" / "web" / "capture_browser.mjs"), "--pw", str(pw)]
-            cmd += ["--url", f"{url}{s['path']}", "--out", str(png), "--expect-path", s["path"],
-                    "--settle-ms", str(web.get("settle_ms", 1500)), "--viewport", str(web.get("viewport", "393x852")),
-                    "--scale", str(rng.get("device_scale_factor", 3)), "--ready-timeout-ms", str(rng.get("ready_timeout_ms", 10000))]
-            if not web.get("full_page", True):
-                cmd.append("--no-full-page")
-            if s.get("ready_selector"):
-                cmd += ["--ready-selector", s["ready_selector"]]
-            cp = subprocess.run(cmd, capture_output=True, text=True, timeout=180, cwd=repo)
             try:
-                cap = json.loads(cp.stdout.strip().splitlines()[-1])
-            except (ValueError, IndexError):
-                cap = {"ok": False, "error": (cp.stdout + cp.stderr)[-800:]}
-            if cp.returncode == 1 and cap.get("error"):
-                runner_unavailable = True
-            s[f"{side}_capture"] = cap
-        stopped = srv.stop()
-        info["server_stopped"] = stopped
-        sides[side] = info
-        if not stopped:
-            result.update(run_status="failed", reason=f"{side} のサーバを止められない（pid {srv.proc.pid}）", sides=sides)
+                url = srv.start(rng.get("serve_url"), web_dir, nonce, float(web.get("ready_timeout_sec", 60)))
+            except RuntimeError as e:
+                result.update(run_status="failed", reason=f"{side} の配信に失敗: {e}")
+                save()
+                return emit(result, 1)
+            info["serve_url"] = url
+            info["server_pgid"] = srv.proc.pid   # start_new_session なので pid = プロセスグループ id
+            save()   # 撮影中に落ちても serve_url / server_pgid と out_dir が result.json に残る
+            for s in screens:
+                if not s[f"{side}_html"]:
+                    s[f"{side}_capture"] = {"ok": False, "error": "route html が export に無い"}
+                    continue
+                png = shots / f"{side}-{s['screen_id']}-p1.png"
+                if capture_cmd:
+                    cmd = ["bash", "-c", capture_cmd + ' "$@"', "_"]
+                else:
+                    cmd = ["node", str(SCRIPTS / "backends" / "web" / "capture_browser.mjs"), "--pw", str(pw)]
+                cmd += ["--url", f"{url}{s['path']}", "--out", str(png), "--expect-path", s["path"],
+                        "--settle-ms", str(web.get("settle_ms", 1500)), "--viewport", str(web.get("viewport", "393x852")),
+                        "--scale", str(rng.get("device_scale_factor", 3)), "--ready-timeout-ms", str(rng.get("ready_timeout_ms", 10000))]
+                if not web.get("full_page", True):
+                    cmd.append("--no-full-page")
+                if s.get("ready_selector"):
+                    cmd += ["--ready-selector", s["ready_selector"]]
+                cp = subprocess.run(cmd, capture_output=True, text=True, timeout=capture_timeout, cwd=repo)
+                try:
+                    cap = json.loads(cp.stdout.strip().splitlines()[-1])
+                except (ValueError, IndexError):
+                    cap = {"ok": False, "error": (cp.stdout + cp.stderr)[-800:]}
+                # exit 1 = ブラウザ側の起動失敗（playwright が読めない / chromium が立たない）。
+                # 画面ごとの goto タイムアウトや保存失敗（stage=page, exit 2）は当該画面の比較不能であって環境問題ではない
+                if cp.returncode == 1 and cap.get("error") and cap.get("stage", "launch") in ("load", "launch"):
+                    runner_unavailable = True
+                s[f"{side}_capture"] = cap
+        finally:
+            info["server_stopped"] = srv.stop()
+        if not info["server_stopped"]:
+            result.update(run_status="failed", reason=f"{side} のサーバを止められない（pid {srv.proc.pid}）")
+            save()
             return emit(result, 1)
         if runner_unavailable:
-            result.update(run_status="skipped_runner_unavailable", sides=sides,
+            result.update(run_status="skipped_runner_unavailable",
                           reason="ブラウザを起動できない環境（sandbox 内など）。通常の Terminal か cmux のペインから同じコマンドを実行",
                           details=[s.get(f"{side}_capture", {}).get("error") for s in screens][:1])
-            (out / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+            save()
             return emit(result, 0)
-    result["sides"] = sides
 
-    # worktree: 撮影中に入力が変わっていないか
+    # worktree: 撮影中に入力が変わっていないか（snapshot のコピー実体のハッシュと、今の作業ツリーを突き合わせる）
     if after_ref is None:
         now = inputs_hash(repo, None, inventory(repo, None, rng["snapshot_paths"]))
         result["inputs_changed_during_capture"] = now != sides["after"]["inputs_sha256"]
@@ -515,15 +579,18 @@ def main() -> int:
     manifest = {
         "mode": "range", "pr_number": "", "pr_title": f"{a.before} → {a.after}", "pr_url": "",
         "base_ref": a.before, "head_ref": a.after,
-        "before_oid": oids["before"], "head_oid": oids["after"], "before_base": "range",
+        "head_oid": oids["after"],
         "after_source": result["after_source"],
         "inputs_changed_during_capture": result.get("inputs_changed_during_capture", False),
         "inputs_sha256": {"before": sides["before"]["inputs_sha256"], "after": sides["after"]["inputs_sha256"]},
         "unsupported": result["unsupported"],
-        "data_caveat": rng.get("data_caveat", "API データは固定していない。Before/After の間のデータ変動が差分に混ざりうる"),
+        "data_caveat": rng.get("data_caveat") or DEFAULT_DATA_CAVEAT,   # null でも既定の注記を出す（契約 §1.5）
         "build_status": "SUCCEEDED", "validation_status": "",
         "generated_at": datetime.now(JST).isoformat(timespec="seconds"), "screens": cards,
     }
+    # Before を 1 枚も撮れていない回（全画面が新規など）は before_oid / before_base を記録しない（契約 §4）
+    if any(s.get("before_capture", {}).get("ok") for s in screens):
+        manifest["before_oid"], manifest["before_base"] = oids["before"], "range"
     (out / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
     rp = run_script([sys.executable, str(SCRIPTS / "render_comparison.py"), "--manifest", str(out / "manifest.json"),
                      "--output", str(out / "comparison.html")])
@@ -535,13 +602,9 @@ def main() -> int:
         result.update(run_status="compared", comparison_html=str(out / "comparison.html"))
     else:
         result.update(run_status="failed", reason="全画面が比較不能（compare_reason 参照）", comparison_html=str(out / "comparison.html"))
-    (out / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+    save()
     return emit(result, 0 if result["run_status"] != "failed" else 1)
 
 
 if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except subprocess.TimeoutExpired as e:
-        print(json.dumps({"mode": "range", "run_status": "failed", "reason": f"タイムアウト: {e.cmd[:3]}"}, ensure_ascii=False))
-        sys.exit(1)
+    sys.exit(main())

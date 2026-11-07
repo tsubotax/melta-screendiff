@@ -39,7 +39,7 @@ python3 "$SCRIPTS/screendiff_range.py" --repo-root "$REPO_ROOT" --before HEAD --
 | `no_ui_change` | 「UI 変更なし（対象ファイル 0 件）」1 行 | 終了 |
 | `skipped_dependency_change` | 「依存変更のため比較対象外」1 行 | 終了（撮影成功に数えない） |
 | `skipped_runner_unavailable` | 「ブラウザ起動不可。Terminal から再実行」1 行 | 本人へ再実行の 1 行を渡す |
-| `failed` | `reason` と `out_dir` のログの場所 | 直せるなら直して再実行 |
+| `failed` | `reason` と `out_dir` のログの場所。`unsupported[]` / `unresolved[]` があれば「未対応: <ファイル>（Simulator で確認）」を併記（対象ファイルはあるのに撮れる画面が 0 のときはこの形で failed。「UI 変更なし」と書かない） | 直せるなら直して再実行 |
 
 3. `compared` のときは comparison.html を**自分で開いて目視**し、画面ごとに 1 行で差分を書く。
    次の注記は**必ず要約に残す**（落とすと成功偽装になる）:

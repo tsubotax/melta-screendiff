@@ -10,8 +10,9 @@
 //        --expect-path </melta/home> [--ready-selector "[data-testid=...]"] [--settle-ms 1500]
 //        [--ready-timeout-ms 10000] [--viewport 393x852] [--scale 3] [--no-full-page]
 //
-// 出力: stdout に JSON 1 行。exit 0 = ok（pathname 一致・ready 不成立なし）、2 = 比較不能、1 = 起動失敗。
-//   ready: "none"（selector 未指定）| "ok" | "missing"
+// 出力: stdout に JSON 1 行。exit 0 = ok（pathname 一致・ready 不成立なし）、2 = 比較不能（ページ段階の失敗を含む）、
+//   1 = 起動失敗（stage が load / launch）。
+//   ready: "none"（selector 未指定）| "ok" | "missing"、stage: "load" | "launch" | "page"
 import { createRequire } from "node:module";
 
 const args = process.argv.slice(2);
@@ -32,9 +33,12 @@ const [vw, vh] = argOf("--viewport", "393x852").split("x").map(Number);
 const scale = Number(argOf("--scale", "3"));
 const fullPage = !has("--no-full-page");
 
+// stage: どこで失敗したか。load（playwright が読めない）/ launch（ブラウザが立たない）は環境問題で exit 1、
+// page（goto タイムアウト・保存失敗など画面固有）は当該画面の比較不能で exit 2。runner はこれで
+// skipped_runner_unavailable（全体を打ち切って Terminal から再実行）と画面単位の unresolvable を分ける
 const result = { ok: false, url, expect_path: expectPath, final_path: null, path_matched: false,
                  ready: readySelector ? "pending" : "none", ready_selector: readySelector || null,
-                 file: null, error: null };
+                 file: null, error: null, stage: "load" };
 
 if (!pwPath || !url || !out) {
   result.error = "--pw / --url / --out は必須";
@@ -54,10 +58,12 @@ try {
 
 let browser;
 try {
+  result.stage = "launch";
   browser = await chromium.launch();
   const ctx = await browser.newContext({ viewport: { width: vw, height: vh }, deviceScaleFactor: scale,
                                          isMobile: true, hasTouch: true, colorScheme: "light" });
   const page = await ctx.newPage();
+  result.stage = "page";
   await page.goto(url, { waitUntil: "load", timeout: 30000 });
   if (readySelector) {
     try {
@@ -81,4 +87,5 @@ try {
   if (browser) await browser.close().catch(() => {});
 }
 process.stdout.write(JSON.stringify(result) + "\n");
-process.exit(result.error ? 1 : result.ok ? 0 : 2);
+// 起動前の失敗だけ 1。ページ段階の失敗は ok=false の 2（画面単位の比較不能）
+process.exit(result.error ? (result.stage === "page" ? 2 : 1) : result.ok ? 0 : 2);
