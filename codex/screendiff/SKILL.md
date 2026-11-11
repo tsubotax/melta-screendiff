@@ -1,58 +1,69 @@
 ---
 name: screendiff
-description: "UI 変更の Before/After を実撮影して横並びの比較 HTML を作る（Codex 版）。PR を出さない main 直 push の個人開発では、push 前に `--range origin/main..HEAD` で未 push の commit 群を比較する。『Before/After を撮って』『見た目の差分を出して』『screendiff』『push 前に画面を比べて』で使う。UI を含まない変更、静的レビューで足りる変更には使わない。"
+description: "UI変更の対象画面をBefore/Afterで実撮影し、横並びの比較HTMLを作る（Codex版）。『Before/Afterを撮って』『見た目の差分を出して』『screendiff』『push前に画面を比べて』で使う。main直pushではpush前のorigin/main..HEADを比較する。UIを含まない変更や静的レビューで足りる変更には使わない。"
 ---
 
-# screendiff（Codex 版・範囲モード）
+# screendiff（Codex版・範囲モード）
 
-Claude Code plugin `melta-screendiff` の範囲モードを Codex から使う手順書。判断は最小限で、
-決定論的な処理は全部 `screendiff_range.py` が行う。**PR は使わない。PR への書き込みは常に禁止。**
+目的は、ユーザーが**今回変更した画面のBefore/Afterを確認できること**。撮影の成功だけでは完了にしない。
+対象の画面と状態は担当者が変更内容から決め、runnerは解決・撮影の補助に使う。
+PRへの書き込みは行わず、`--share local`でローカルHTMLを渡す。
 
-## 前提
+## 前提と実行経路
 
-- 対象リポジトリに `.claude/screendiff.json`（または `~/.config/melta-screendiff/<repo名>.json`）があり、
-  `range` 節と `screens` が設定されていること。無ければ `examples/screendiff.range-expo.json` を案内して止まる
-- スクリプトの場所: `SCRIPTS=<melta-screendiff のルート>/skills/screendiff/scripts`
-  （plugin のキャッシュなら `~/.claude-tsubotax/plugins/cache/melta/screendiff/<version>/skills/screendiff/scripts`、
-  開発中なら `/Users/tsubotax/My_Data/08_Melta/melta-screendiff/skills/screendiff/scripts`）
-- Codex には Artifact が無い。**`--share local` 固定**。HTML の絶対パスを提示して終わる
-- **ブラウザ（Chromium）は sandbox の中では起動できない**。`run_status` が `skipped_runner_unavailable` なら、
-  通常の Terminal か cmux の自分のペインから同じコマンドを実行する。撮れなかった回は「未確認」として残し、
-  通常の push は止めない
+- 対象repoの `.claude/screendiff.json` または `~/.config/melta-screendiff/<repo名>.json` に `range` と `screens` が必要。無ければ設定不足を報告する。
+- `SCRIPTS` はmelta-screendiffの `skills/screendiff/scripts`。開発中の実体は `/Users/tsubotax/My_Data/08_Melta/melta-screendiff/skills/screendiff/scripts`、plugin配置なら実際の版を確認する。
+- 既存WIPを保持し、Before/Afterは隔離snapshotからビルドする。作業ツリーのcheckoutやstashで切り替えない。
+- ブラウザ起動は対象repoのsandbox・復旧手順に従う。権限拒否を別Terminalで回避しない。
 
-## 手順
+## 撮影前に対象を決める
 
-1. 対象判定は runner に任せる。叩くだけ:
+会話とdiffから、変更を確認できる画面・URL（動的IDやqueryを含む）・状態を特定する。通常は短い作業メモで足り、別の計画書や承認工程は増やさない。
+
+- 何が変わるか（例: 情報カードが消え、名前が固定ヘッダへ移る）。
+- どの入口・状態で見えるか。ボトムナビの有無など変更に関わる違いだけを選ぶ。
+- 同じ表示条件を両側で用意できるか。データ、機能flag、認証、viewportを揃え、対象部品が実際に使われる条件を確認する。
+
+設定とresolverの対応を確認する。動的routeの `fixed_params` 不足、共通部品の無関係な `representative` への振り分け、API無効で別の見本部品へ入るケースに注意する。
+**代表画面を撮れることは、変更した部品が写る根拠にならない。**
+
+対応が足りなければ、既存runnerの `--config` で対象用設定を渡すか、隔離ビルドを対象URL・操作で直接撮影する。恒久設定やrunner本体の改修は別途依頼範囲で判断する。動的URLは設定を足してもexportのHTML判定で撮影不能になることがあるため、実描画まで確認する。
+一時設定・撮影補助スクリプトは一時領域に置き、作成者が撮影・検証後に削除する。証跡は対象repoの保管規則に従う。
+
+## 撮影
+
+通常の未push範囲:
 
 ```bash
 REPO_ROOT=$(git rev-parse --show-toplevel)
 python3 "$SCRIPTS/screendiff_range.py" --repo-root "$REPO_ROOT" --before origin/main --after HEAD --share local
-# 未 commit を見たいときだけ（明示実行のみ。commit 比較の代用にしない）
-python3 "$SCRIPTS/screendiff_range.py" --repo-root "$REPO_ROOT" --before HEAD --after worktree --share local
+# 対象用設定が必要なら --config <設定JSONの絶対パス> を追加
 ```
 
-2. stdout の JSON の `run_status` で分岐する。**どの値でも push を止めない**:
+push後の撮り直しは、元のBefore/AfterのSHAを指定する。進んだorigin/mainを使って差分を消さない。
+未commit比較は明示時だけ `--before HEAD --after worktree`。commit比較の代用にはしない。
 
-| run_status | 報告 | 次 |
-|---|---|---|
-| `compared` | `comparison_html` の絶対パスと、`screens[]` の要約 | 3 へ |
-| `no_ui_change` | 「UI 変更なし（対象ファイル 0 件）」1 行 | 終了 |
-| `skipped_dependency_change` | 「依存変更のため比較対象外」1 行 | 終了（撮影成功に数えない） |
-| `skipped_runner_unavailable` | 「ブラウザ起動不可。Terminal から再実行」1 行 | 本人へ再実行の 1 行を渡す |
-| `failed` | `reason` と `out_dir` のログの場所。`unsupported[]` / `unresolved[]` があれば「未対応: <ファイル>（Simulator で確認）」を併記（対象ファイルはあるのに撮れる画面が 0 のときはこの形で failed。「UI 変更なし」と書かない） | 直せるなら直して再実行 |
+runnerの出力は次のように扱う。撮影結果だけでpush可否を決めず、repoの完了条件を優先する。
 
-3. `compared` のときは comparison.html を**自分で開いて目視**し、画面ごとに 1 行で差分を書く。
-   次の注記は**必ず要約に残す**（落とすと成功偽装になる）:
-   - `compare_status: unresolvable` の画面は「比較不能（理由）」。差分なしと書かない
-   - `representative: true` の画面は「代表画面のみ。変更箇所が写っていない可能性」
-   - `unsupported[]` があれば「未対応: <ファイル>（Simulator で確認）」
-   - `inputs_changed_during_capture: true` なら「撮影中に作業ツリーが変わった。撮り直し」
-   - データ変動の注記（API を固定していない）
+| `run_status` | 対処 |
+|---|---|
+| `compared` | 撮影処理の成功。下の対象確認を行ってから完了を判断する |
+| `no_ui_change` | diffと一致するときだけ「UI変更なし」。意図した変更があるなら範囲・対象判定を調べる |
+| `skipped_dependency_change` | 依存変更のため未撮影と報告する |
+| `skipped_runner_unavailable` | 起動不可として、repoが認める実行経路で復旧する。未撮影を成功扱いしない |
+| `failed` | reasonとログを確認する。依頼範囲で直せる原因を修正して撮り直す |
 
-4. 撮り直しは同じコマンド。出力は実行ごとに `output_dir/range/<時刻>/` に分かれ、過去は消さない。
+## 比較の受け入れと提示
 
-## やらないこと
+HTMLと実画像を開き、予定した画面・状態と照合する。
 
-- `gh pr comment` / `gh pr edit` / PR 本文の更新（範囲モードには PR が無い。share_plan が forbidden にする）
-- 作業ツリーでの `git checkout` / `git stash`（両側とも隔離 snapshot からビルドする）
-- 比較不能・未対応・代表画面の注記を省いた「差分なし」の報告
+- Before/Afterが同じ画面・データ条件で、変更した部品を含むことを確認する。エラー画面や未完了の読み込みを対象画面の代わりにしない。
+- 変更ごとに「画像のどこに何が変わったか」を説明できることを完了条件にする。見た目が同じなら期待どおりか、対象違い・flag・データ不足かを判断する。
+- **代表画面のみ・対象欠落・別実装の見本しか撮れていない結果は『変更箇所未確認』または『一部確認』**。注記だけ付けて対象の比較完了にはしない。依頼範囲で対象を撮り直す。撮れない場合は、欠けた対象と原因を具体的に報告する。
+- `unsupported` / `unresolved` / `compare_status: unresolvable` は対象単位で残す。`inputs_changed_during_capture` がtrueなら入力を固定して撮り直す。
+- 比較ページの主掲載は変更対象だけにする。無関係な代表画面で埋めない。周辺画面の回帰確認が必要なら別枠にし、対象確認と区別する。
+- データ変動、見本データ、画像fallback、実API経路未確認など、比較の意味を変える条件をページと最終報告に明記する。
+
+最終報告には比較HTMLの絶対パス、確認できた変更、未確認があればその対象を含める。
+既存ページの修正依頼なら元のURLから修正版を見られるようにし、旧結果は保管規則に従って残す。生のrunner結果を成功に書き換えない。
+Artifact発行、PRコメント、PR本文更新は行わない。
